@@ -1,0 +1,98 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---- Packaging / build backends ----
+pip-wheel-metadata/
+share/python-wheels/
+
+# ---- Testing / coverage ----
+.pytest_cache/
+.cache
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+*.py,cover
+htmlcov/
+nosetests.xml
+.hypothesis/
+
+# ---- Type checking / linting ----
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+
+# ---- Virtual environments ----
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.python-version
+
+# ---- Distribution / dependency locking ----
+requirements/*.lock
+!requirements/.gitkeep
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ---- Suite runtime state (this component's local data) ----
+# The application writes to XDG paths at runtime (~/.config, ~/.local/share,
+# ~/.local/state per Master Architecture §1.2), never inside the repository.
+# These entries only guard against a developer pointing XDG_* at the repo
+# during local testing.
+.local/
+.config/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+/data/
+/logs/
+/backups/
+/artifacts/
+/exports/
+
+# ---- Secrets ----
+# Per Security Standards §8: secrets are never committed. Config files may
+# only name where a secret comes from (*_env / *_file), never the value.
+.env
+.env.*
+*.key
+*.pem
+secrets.toml
+
+# ---- Node-free JS assets (MirrorWall consumers may still use a local tool) ----
+node_modules/
+
+# ---- Build artifacts from docs generation ----
+docs/api/openapi-v1.json.tmp

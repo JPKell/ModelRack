@@ -1,0 +1,20 @@
+[importlinter]
+root_packages = modelrack
+
+[importlinter:contract:no-application-imports]
+name = ModelRack must not import applications
+type = forbidden
+source_modules = modelrack
+forbidden_modules =
+    freeweight
+    loadcoach
+    ideapress
+
+[importlinter:contract:no-sibling-packages]
+name = ModelRack must not import sibling capability packages
+type = forbidden
+source_modules = modelrack
+forbidden_modules =
+    sweatmeter
+    weightsdb
+    mirrorwall
