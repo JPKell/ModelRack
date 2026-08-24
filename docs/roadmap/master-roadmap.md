@@ -269,7 +269,7 @@ declared.
 The first three actions, in order:
 
 1. **Create the BaseAiCore repository** and execute
-   [BaseAiCore Phase 1](../packages/baseaicore/development-plan.md#phase-1--measurement-identity-and-time-primitives).
+   [BaseAiCore Phase 1](../packages/baseaicore/development-plan.md#phase-1--measurement-identity-time-and-cost-primitives).
    Everything else is blocked on it.
 2. **Establish the shared CI workflow template** (format, lint, types, import-linter, tests,
    coverage, security, build, install-check) once, and copy it into each repository as it is created.

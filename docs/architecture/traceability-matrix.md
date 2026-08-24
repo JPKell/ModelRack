@@ -22,6 +22,7 @@ resolved.
 | Measurement subject and comparability | **BaseAiCore** | FreeWeight, LoadCoach | Python API | [Canonical Model Identity §5](canonical-model-identity.md) |
 | Machine identity and fingerprint | **BaseAiCore** (type + hash) / **SweatMeter** (collection) | All | Python API + SetSpec `machine.profile` | [Machine Identity](machine-identity-and-reproducibility.md) |
 | "Unavailable is not zero" | **BaseAiCore** | All | Python API (`Unsupported`) | [ADR-0016](../adr/0016-unavailable-is-not-zero.md) |
+| Money, token usage and model cost | **BaseAiCore** (types + arithmetic) / **ModelRack** and the applications (price acquisition) | FreeWeight, LoadCoach, IdeaPress | Python API | [ADR-0030](../adr/0030-model-cost-and-pricing.md) · [BaseAiCore §7](../packages/baseaicore/spec.md) |
 | Capability identifier type | **BaseAiCore** | All | Python API | [BaseAiCore §7](../packages/baseaicore/spec.md) |
 | Capability **vocabulary** and its version | **SetSpec** | FreeWeight, LoadCoach, IdeaPress | SetSpec | [Master Architecture §1.4](master-architecture.md) |
 | IDs (ULID) and timezone-aware timestamps | **BaseAiCore** | All | Python API | [BaseAiCore §7](../packages/baseaicore/spec.md) |

@@ -1,20 +1,27 @@
 [importlinter]
-root_packages = modelrack
+root_packages =
+    modelrack
+# The forbidden modules below are external distributions, not submodules of modelrack, so the
+# graph has to include external packages for the contracts to be able to see them at all.
+include_external_packages = True
 
 [importlinter:contract:no-application-imports]
 name = ModelRack must not import applications
 type = forbidden
-source_modules = modelrack
+source_modules =
+    modelrack
 forbidden_modules =
     freeweight
     loadcoach
     ideapress
 
 [importlinter:contract:no-sibling-packages]
-name = ModelRack must not import sibling capability packages
+name = ModelRack must not import sibling suite packages
 type = forbidden
-source_modules = modelrack
+source_modules =
+    modelrack
 forbidden_modules =
+    setspec
     sweatmeter
     weightsdb
     mirrorwall

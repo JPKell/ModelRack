@@ -38,9 +38,10 @@ a copied document (`../../adr/...`, `../../standards/...`) resolves correctly he
 ### Suite-wide standards (13 files)
 Every file in [standards/](standards/) — these apply to all nine repositories identically.
 
-### Architecture Decision Records (30 files)
+### Architecture Decision Records (31 files)
 The complete ADR set in [adr/](adr/README.md), including the eight added by the post-freeze audit
-(0022–0029) and the seven amended by it. A component only *acts on* the ADRs its own spec and
+(0022–0029), the seven amended by it, and [ADR-0030](adr/0030-model-cost-and-pricing.md) (model
+cost and pricing). A component only *acts on* the ADRs its own spec and
 development plan reference, but the full set is included because ADRs cross-reference each other and
 a partial set would have dangling links.
 

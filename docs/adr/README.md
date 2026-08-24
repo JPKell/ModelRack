@@ -52,6 +52,7 @@ A decision without a "revisit when" trigger is a decision nobody can safely revi
 | [0027](0027-multi-gpu-semantics.md) | Multi-GPU semantics | Accepted |
 | [0028](0028-prompt-pack-granularity.md) | Prompt attribution granularity and shared prompt tooling | Accepted |
 | [0029](0029-queue-mechanics.md) | Queue mechanics: ageing, attempts, admission states and leases | Accepted |
+| [0030](0030-model-cost-and-pricing.md) | Model cost: prices are dated observations, not model properties | Accepted |
 
 ## Writing a new ADR
 

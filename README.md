@@ -2,9 +2,12 @@
 
 The suite's only model client: a provider-neutral abstraction over local inference runtimes (Ollama first), with a deterministic FakeProvider.
 
-**Status:** specified, not yet implemented. This repository currently holds the project scaffold
-(directory structure, tooling configuration, and a local copy of the relevant suite documentation) —
-see [development plan](docs/packages/modelrack/development-plan.md) for what each phase adds.
+**Status:** `0.2.0` — Phases 1–2 complete. The provider-neutral vocabulary, the streamed-event
+union and the `Provider` protocol exist and type-check, and the first adapter ships: a
+deterministic, scriptable `FakeProvider` in `modelrack.testing`. `OllamaProvider` arrives in
+Phase 3 — the fake is built first, deliberately, so the rest of the suite can be built and tested
+without a GPU, a model or a running runtime. See the
+[development plan](docs/packages/modelrack/development-plan.md) for what each phase adds.
 
 Part of the **Local AI Suite** — see [docs/architecture/executive-summary.md](docs/architecture/executive-summary.md)
 for how ModelRack fits with the suite's other applications and packages.
@@ -17,8 +20,115 @@ pip install modelrack
 
 ## Quickstart
 
+Application code takes a `Provider` and never names one:
+
 ```python
-import modelrack
+from baseaicore import ModelIdentity
+from modelrack import GenerationRequest, Message, Provider, Role, SamplingParameters
+
+
+def summarize(provider: Provider, identity: ModelIdentity, text: str) -> str:
+    request = GenerationRequest(
+        identity=identity,
+        messages=(Message(role=Role.USER, content=f"Summarize: {text}"),),
+        sampling=SamplingParameters(temperature=0.0, seed=42),
+    )
+    return provider.generate(request).text
+```
+
+Its tests supply the fake, which needs no GPU, no model and no network:
+
+```python
+from modelrack.testing import FakeProvider, FakeScript
+
+provider = FakeProvider(FakeScript(), seed=42)
+print(summarize(provider, provider.resolve("fake-model"), "a long document"))
+```
+
+## Testing against the fake
+
+`FakeProvider` is shipped API, not a test helper — every default test suite in the suite runs
+against it, so it is deterministic, honest about what it cannot do, and scriptable into the cases
+that actually break callers. A `FakeScript` says what the provider serves and what successive
+calls do:
+
+```python
+from modelrack.testing import (
+    FakeFailure,
+    FakeFailureMode,
+    FakeGeneration,
+    FakeProvider,
+    FakeScript,
+    FakeToolCall,
+)
+
+script = FakeScript(
+    generations=(
+        # A slow first token, then steady output — reported in `Timing`, but costing no wall
+        # time unless you inject `sleep=time.sleep`.
+        FakeGeneration(word_count=40, first_chunk_delay_ms=900, chunk_delay_ms=8),
+        # A tool call whose arguments are not valid JSON, which real models do emit.
+        FakeGeneration(
+            word_count=0,
+            tool_calls=(FakeToolCall(name="get_weather", raw_arguments='{"city": "Berlin"'),),
+        ),
+        # A stream that stops without its terminal chunk, four deltas in.
+        FakeGeneration(
+            failure=FakeFailure(mode=FakeFailureMode.TRUNCATED_STREAM, after_chunks=4),
+        ),
+    ),
+)
+provider = FakeProvider(script, seed=42)
+```
+
+Given the same script and seed, it produces byte-identical text, chunking, token counts and
+tool-call identifiers in another process, on another platform and under another `PYTHONHASHSEED`.
+
+Two ready-made declarations bracket the range a caller has to survive: `FULL_CAPABILITIES` (the
+default) and `MINIMAL_CAPABILITIES`, where every flag is `False` and every optional feature is
+refused with `CapabilityUnsupported`. Testing against only the first is testing against the easy
+half:
+
+```python
+from modelrack.testing import MINIMAL_CAPABILITIES
+
+weak = FakeProvider(FakeScript(capabilities=MINIMAL_CAPABILITIES))
+weak.capabilities().streaming  # False — and stream() raises rather than silently degrading
+```
+
+The script refuses to describe a provider the fake could only imitate by lying: reasoning content
+on a provider that declares it reports none, token counts on one that declares it counts nothing,
+or `token_level_chunks` alongside deltas that are not one token each — each is a `ValidationError`
+at construction rather than a wrong number in a downstream benchmark. And every adapter, fake or
+real, passes one conformance suite:
+[`tests/contract/test_conformance.py`](tests/contract/test_conformance.py).
+
+Two rules run through every type here. An unavailable measurement is `UNSUPPORTED`, never `0`
+([ADR-0016](docs/adr/0016-unavailable-is-not-zero.md)) — so a provider that reported no token
+counts yields a result that says so rather than one that averages away real throughput. And what a
+provider *reported* about its own work is never merged with what this process *observed*:
+
+```python
+from modelrack import Timing
+
+timing = Timing(backend_decode_ms=300, client_wall_ms=412)
+timing.backend_decode_ms  # what Ollama said it spent decoding
+timing.client_wall_ms  # what this process measured end to end
+```
+
+There is deliberately no combined duration field. The two disagree for real reasons — queueing,
+transport, scheduling — and a benchmark comparing one runtime's self-report against another's wall
+clock is comparing nothing.
+
+Capabilities are checked, never assumed
+([ADR-0007](docs/adr/0007-provider-abstraction.md) rule 2):
+
+```python
+def stream_if_possible(provider: Provider) -> bool:
+    capabilities = provider.capabilities()
+    # `token_level_chunks` gates any per-token latency claim: when it is False, the gap between
+    # two deltas is inter-chunk latency and must not be relabelled.
+    return capabilities.streaming and capabilities.token_level_chunks
 ```
 
 See [docs/packages/modelrack/spec.md](docs/packages/modelrack/spec.md) §20 for a runnable example.

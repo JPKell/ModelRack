@@ -115,7 +115,7 @@ dependencies = [
     "baseaicore>=0.4,<0.5",
     "setspec>=0.3,<0.4",
     "modelrack>=0.5,<0.6",
-    "sweatmeter>=0.3,<0.4",
+    "sweatmeter>=0.4,<0.5",
     "weightsdb>=0.2,<0.3",
     "mirrorwall>=0.2,<0.3",
     "fastapi>=0.115,<1",
@@ -141,7 +141,7 @@ dependencies = [
 ```toml
 [project.optional-dependencies]
 postgres  = ["psycopg[binary]>=3.2,<4"]
-telemetry = ["sweatmeter>=0.3,<0.4"]     # IdeaPress: optional display only
+telemetry = ["sweatmeter>=0.4,<0.5"]     # IdeaPress: optional display only
 dev       = ["pytest", "pytest-cov", "mypy", "ruff", "import-linter", "respx", …]
 ```
 

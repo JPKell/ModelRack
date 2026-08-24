@@ -54,8 +54,10 @@ venv.bak/
 .python-version
 
 # ---- Distribution / dependency locking ----
-requirements/*.lock
-!requirements/.gitkeep
+# requirements/*.lock is deliberately NOT ignored. The lock files are committed
+# inputs: CI and release jobs install from them with --require-hashes (Packaging
+# and Release Standards §4, Security Standards §11), so an ignored lock file
+# means a checkout that cannot build.
 
 # ---- Editors / OS ----
 .vscode/

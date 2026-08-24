@@ -26,7 +26,9 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8,<9",
+    # >=9.0.3 excludes PYSEC-2026-1845 (vulnerable /tmp/pytest-of-{user} handling,
+    # affecting pytest through 9.0.2). Matches the pin BaseAiCore and SetSpec already moved to.
+    "pytest>=9.0.3,<10",
     "pytest-cov>=5,<6",
     "pytest-randomly>=3,<4",
     "mypy>=1.11,<2",
@@ -36,8 +38,9 @@ dev = [
 ]
 
 [project.urls]
-Documentation = "docs/"
-Changelog = "CHANGELOG.md"
+Homepage = "https://github.com/JPKell/ModelRack"
+Documentation = "https://github.com/JPKell/ModelRack/tree/main/docs"
+Changelog = "https://github.com/JPKell/ModelRack/blob/main/CHANGELOG.md"
 
 [tool.hatch.version]
 path = "src/modelrack/__about__.py"
@@ -49,6 +52,11 @@ packages = ["src/modelrack"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
+# ruff formats Python code blocks inside markdown. `docs/` is a verbatim copy of the suite's
+# master documents, shared byte-for-byte with the other nine repositories, so reformatting it
+# here would desync it from its source and from every sibling copy. Excluded rather than
+# reformatted; the documents are maintained where they originate.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "S", "T20", "DTZ", "PTH", "D1", "BLE"]
@@ -79,5 +87,6 @@ source = ["src/modelrack"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 85
+# Spec §18 and acceptance criterion 7 both say 95; the scaffold shipped 85.
+fail_under = 95
 show_missing = true
