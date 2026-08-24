@@ -1,0 +1,6 @@
+{
+  "provider": "ollama",
+  "provider_version": "0.32.13",
+  "captured": "2026-08-23",
+  "note": "Recorded shapes for modelrack.providers.ollama's conformance and unit tests (spec §19: a provider version bump triggers re-capture and a changelog note). Fixture bodies here are representative payloads matching Ollama's documented API for this version, not a byte-for-byte capture from a running server — this repository has no Ollama installation. tests/live/test_ollama_live.py is what proves these shapes against a real one."
+}

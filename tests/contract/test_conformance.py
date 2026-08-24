@@ -23,9 +23,12 @@ consequences.
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
+import respx
 from baseaicore import IdentityConfidence, RuntimeProfile, is_supported
 
 from modelrack import (
@@ -47,6 +50,7 @@ from modelrack import (
     ToolCallDelta,
     ToolDefinition,
 )
+from modelrack.providers.ollama import OllamaProvider
 from modelrack.streaming import CancellationToken
 from modelrack.testing import (
     FULL_CAPABILITIES,
@@ -57,7 +61,7 @@ from modelrack.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from baseaicore import ModelIdentity
 
@@ -523,3 +527,68 @@ class TestFakeProviderChunkedConformance(ProviderConformanceSuite):
     @pytest.fixture
     def known_reference(self) -> str:
         return "fake-model:8b-q8_0"
+
+
+class TestOllamaProviderConformance(ProviderConformanceSuite):
+    """The same suite against :class:`~modelrack.providers.ollama.OllamaProvider`, over a
+    recorded transport.
+
+    Spec §11.5's whole point, proven the way it has to be proven: not by asserting the fake and
+    the real adapter *look* similar, but by running one behaviour suite against both and letting
+    it fail if they diverge. The mock router below models just enough server-side state — which
+    model is currently resident — for the residency behaviours to observe a real transition,
+    because a static canned response could not:
+    ``test_residency_control_is_honoured_or_refused`` loads a model and then unloads it and
+    expects the second call to see what the first one did.
+    """
+
+    @pytest.fixture
+    def provider(self, load_ollama_fixture: Callable[[str], Any]) -> Iterator[Provider]:
+        resident = {"is_resident": False}
+
+        def show_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            is_llama = body.get("model") == "llama3.2:3b-instruct-q4_0"
+            fixture = "show_llama.json" if is_llama else "show_qwen.json"
+            return httpx.Response(200, json=load_ollama_fixture(fixture))
+
+        def ps_handler(_request: httpx.Request) -> httpx.Response:
+            fixture = "ps_resident.json" if resident["is_resident"] else "ps_empty.json"
+            return httpx.Response(200, json=load_ollama_fixture(fixture))
+
+        def generate_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            resident["is_resident"] = body.get("keep_alive") != 0
+            fixture = (
+                "generate_unload.json" if body.get("keep_alive") == 0 else "generate_load.json"
+            )
+            return httpx.Response(200, json=load_ollama_fixture(fixture))
+
+        def chat_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body.get("stream"):
+                return httpx.Response(
+                    200,
+                    content=load_ollama_fixture("chat_stream.ndjson"),
+                    headers={"Content-Type": "application/x-ndjson"},
+                )
+            return httpx.Response(200, json=load_ollama_fixture("chat_complete.json"))
+
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("http://ollama.conformance.test/api/version").mock(
+                return_value=httpx.Response(200, json=load_ollama_fixture("version.json"))
+            )
+            mock.get("http://ollama.conformance.test/api/tags").mock(
+                return_value=httpx.Response(200, json=load_ollama_fixture("tags.json"))
+            )
+            mock.post("http://ollama.conformance.test/api/show").mock(side_effect=show_handler)
+            mock.get("http://ollama.conformance.test/api/ps").mock(side_effect=ps_handler)
+            mock.post("http://ollama.conformance.test/api/generate").mock(
+                side_effect=generate_handler
+            )
+            mock.post("http://ollama.conformance.test/api/chat").mock(side_effect=chat_handler)
+            yield OllamaProvider(base_url="http://ollama.conformance.test")
+
+    @pytest.fixture
+    def known_reference(self) -> str:
+        return "qwen3.5:9b-q8_0"

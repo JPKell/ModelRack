@@ -6,7 +6,7 @@ that FreeWeight, LoadCoach and IdeaPress never contain provider HTTP code, never
 JSON, and never disagree about what a token count or a timing means
 ([spec §1](../../docs/packages/modelrack/spec.md)).
 
-What is exported below is the public API as of Phase 2
+What is exported below is the public API as of Phase 3
 (``docs/packages/modelrack/development-plan.md``): the provider-neutral request and result
 vocabulary, the streamed-event union with its cancellation token, the ``Provider`` protocol and the
 types describing what a provider is, and the full error hierarchy.
@@ -15,8 +15,12 @@ The first adapter that ships is the **fake** one, deliberately
 ([ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 6): ``FakeProvider`` is imported from
 ``modelrack.testing``, not from here, so that the rest of the suite can be developed and tested
 without a GPU, a model or a running runtime, while a test double stays one import away from the
-production namespace rather than inside it. ``OllamaProvider`` arrives in Phase 3 and
-``OpenAICompatibleProvider`` in Phase 4.
+production namespace rather than inside it. The first *real* adapter,
+:class:`~modelrack.providers.ollama.OllamaProvider`, is imported from
+``modelrack.providers.ollama`` for a related but distinct reason: it is the one place in this
+package that imports ``httpx``, and a process that only ever talks to the fake — most of this
+suite's own test runs — has no reason to pay for that import.
+``OpenAICompatibleProvider`` arrives in Phase 4.
 
 Anything not listed in ``__all__`` is private and may change without a version bump.
 

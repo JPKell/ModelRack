@@ -7,6 +7,94 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-23
+
+Phase 3 of the [development plan](docs/packages/modelrack/development-plan.md): `OllamaProvider`,
+the first real adapter. Discovery, generation, streaming, tool calls, structured output, and
+residency control, all reached over Ollama's HTTP API and proven against the same conformance
+suite `FakeProvider` already passes — and, beyond the recorded-fixture default suite, against a
+real Ollama 0.32.13 server on the reference machine (`pytest -m live`), including a hybrid
+architecture whose `/api/show` response reports `attention.head_count_kv` as JSON `null`: handled
+correctly as `UNSUPPORTED` with no code written specifically for that case, because the type check
+that degrades any non-numeric value already covered it.
+
+### Added
+- `modelrack.providers.ollama.OllamaProvider`: the second `Provider` implementation, and the
+  first to make a real HTTP call. Imported from its own module, not from `modelrack` or
+  `modelrack.testing` — the one place in this package `httpx` is imported, so a process that only
+  ever talks to the fake never pays for that import.
+- `providers/_http.py`: transport plumbing shared by every real adapter — `build_client`,
+  `validate_base_url` (http/https only, non-loopback flagged remote per spec §14),
+  `translate_transport_error` for a failure before a connection is established,
+  `translate_stream_interruption` for one *after* a stream has already yielded content
+  (deliberately a different mapping — see Fixed, below), `read_capped_json` and
+  `iter_capped_lines` for the two size caps spec §14 requires (default 64 MiB total, 8 MiB per
+  streamed line), and best-effort `[Errno N]` message classification into
+  `ProviderUnavailableReason`, documented as exactly that: message-sniffing, because httpx's own
+  exception wrapping discards the structured `errno` a raw `OSError` carried.
+- `providers/_ollama_wire.py`: pure translation from Ollama's wire shapes to this package's
+  types — architecture-prefixed `/api/show` metadata (`general.architecture` read first, every
+  other field looked up under that prefix, which is what makes the parser work across any model
+  family without a hard-coded architecture name), nanosecond-to-millisecond backend timing
+  extraction, tool-call parsing with synthesized ids (Ollama's own shape carries none), and a
+  best-effort context-overflow message match — Ollama gives no distinct error code for that
+  condition, only prose, so it is matched conservatively and documented as exactly that.
+- NDJSON streaming built on `httpx.Response.iter_lines()`'s incremental UTF-8 decoder rather than
+  hand-rolled buffering, verified directly (`tests/unit/test_ollama_adapter.py::TestNdjsonChunking`)
+  against a multi-byte character split across two raw byte chunks, a JSON line split across two
+  raw chunks including at the newline itself, and one line assembled from many small raw reads —
+  the scenario the development plan names by name for this phase.
+- Every scripted failure a real Ollama can produce, translated to the typed error spec §13 names
+  for it: connection refused, timeout, a non-JSON body, an oversize response or streamed chunk,
+  404 model-not-found, a 4xx (or a 5xx that still carries a provider message — see Changed, below)
+  bad-options rejection, a context-overflow message, and a mid-stream in-band error — Ollama can
+  signal a generation failure as an ordinary NDJSON line after already sending a 200, and this
+  adapter delivers it as `StreamFailed` rather than raising, the same rule
+  `modelrack.providers.fake` already follows for cancellation.
+- `tests/fixtures/providers/ollama/`: recorded response shapes, version-annotated in that
+  directory's `manifest.json` (spec §19), covering complete metadata, partial metadata, an unknown
+  architecture, and every documented error body — the artifact spec §18's test-strategy table
+  names for "Ollama adapter" and "Metadata normalization".
+- `tests/live/test_ollama_live.py`: real discovery, generation, streaming, cancellation and
+  unload against an actual server, marked `@pytest.mark.live` and excluded from the default run.
+  Skips gracefully when unreachable; `MODELRACK_REQUIRE_OLLAMA=1` turns that skip into a failure,
+  the escape hatch `WEIGHTSDB_REQUIRE_POSTGRES` already gives WeightsDB's own conditionally-skipped
+  dialect tests, so a broken Ollama integration cannot hide behind a silent skip in the nightly job.
+- `TestOllamaProviderConformance` in `tests/contract/test_conformance.py`: the shared behaviour
+  suite, bound to this adapter over a recorded transport that models real server-side state (which
+  model is currently resident) rather than static canned responses, because the residency
+  behaviours load a model and then unload it and expect the second call to see what the first did.
+
+### Changed
+- Error classification after a stream has already yielded content is *not* the same mapping used
+  before one starts. `ProviderUnavailable`'s own contract is that the provider "could not be
+  reached **at all**", which a connection that was already delivering deltas contradicts; a reset
+  or malformed-framing failure there is classified as `ProviderProtocolError` instead — spec
+  §13's "stream truncated without a terminal chunk" row, applied to *why* it truncated rather than
+  only to a clean-but-incomplete close. A timeout stays a timeout either way.
+- `ProviderRejected` is produced from *any* status carrying an extractable `{"error": "..."}`
+  message, not only a 4xx. Spec §13's table names "4xx with a provider message", but Ollama is not
+  rigorously HTTP-semantic about which status accompanies which failure, and trusting the exact
+  status number over the message it carries would be the version-fragility
+  [risk register E1](docs/architecture/risk-register.md) names as this adapter's own biggest risk.
+  An unexpected status with *no* extractable message still falls back to `ProviderProtocolError`.
+- `list_models()` costs one `/api/show` call per model on top of one `/api/tags` call, which is
+  exactly what [spec §15](docs/packages/modelrack/spec.md)'s performance budget already priced in
+  ("cold, 20 models: ≤ 3 s, dominated by per-model `show` calls") — `/api/tags` alone carries no
+  layer count, head counts or embedding width, and those are what FreeWeight's KV-cache benchmark
+  needs.
+
+### Fixed
+- Nothing shipped in Phase 2 broke; this is new surface, not a repair.
+
+### Security
+- Response size caps enforced during the read itself (`read_capped_json`, `iter_capped_lines`),
+  never after buffering the whole body first — the point of a cap (spec §14) is never holding more
+  than the limit in memory, and checking only afterward would have already spent it.
+- Every request disables redirect-following (`follow_redirects=False`): a local inference runtime
+  has no legitimate redirect to follow, and one would be a silent change of which server is
+  actually being talked to.
+
 ## [0.2.0] — 2026-08-23
 
 Phase 2 of the [development plan](docs/packages/modelrack/development-plan.md): `FakeProvider`,

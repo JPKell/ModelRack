@@ -2,11 +2,12 @@
 
 The suite's only model client: a provider-neutral abstraction over local inference runtimes (Ollama first), with a deterministic FakeProvider.
 
-**Status:** `0.2.0` — Phases 1–2 complete. The provider-neutral vocabulary, the streamed-event
-union and the `Provider` protocol exist and type-check, and the first adapter ships: a
-deterministic, scriptable `FakeProvider` in `modelrack.testing`. `OllamaProvider` arrives in
-Phase 3 — the fake is built first, deliberately, so the rest of the suite can be built and tested
-without a GPU, a model or a running runtime. See the
+**Status:** `0.3.0` — Phases 1–3 complete. The provider-neutral vocabulary, the streamed-event
+union and the `Provider` protocol exist and type-check; a deterministic, scriptable `FakeProvider`
+ships in `modelrack.testing`; and the first real adapter, `OllamaProvider`, talks to a real Ollama
+server over HTTP — discovery, generation, streaming, tool calls, structured output and residency
+control, all against the same conformance suite the fake proves itself against.
+`OpenAICompatibleProvider` arrives in Phase 4. See the
 [development plan](docs/packages/modelrack/development-plan.md) for what each phase adds.
 
 Part of the **Local AI Suite** — see [docs/architecture/executive-summary.md](docs/architecture/executive-summary.md)
@@ -132,6 +133,40 @@ def stream_if_possible(provider: Provider) -> bool:
 ```
 
 See [docs/packages/modelrack/spec.md](docs/packages/modelrack/spec.md) §20 for a runnable example.
+
+## Talking to a real Ollama
+
+`OllamaProvider` implements the same `Provider` protocol over Ollama's HTTP API — swap it in where
+`FakeProvider` stood in a test, and application code does not change:
+
+```python
+from modelrack.providers.ollama import OllamaProvider
+
+provider = OllamaProvider(base_url="http://127.0.0.1:11434")  # the default, if omitted
+identity = provider.resolve("qwen3.5:9b-q8_0")
+print(summarize(provider, identity, "a long document"))
+```
+
+Imported from `modelrack.providers.ollama`, not from `modelrack` itself — this is the one module
+in the package that imports `httpx`, and a process that only ever talks to the fake has no reason
+to pay for that import. Two things this adapter is built around, both load-bearing:
+
+* **NDJSON streaming survives a chunk boundary landing anywhere.** A streamed response is one JSON
+  object per line, and neither a line break nor a multi-byte character inside one line is
+  guaranteed to arrive in a single TCP read. Reassembly is `httpx`'s own incremental UTF-8 decoder
+  (`Response.iter_lines()`), not a hand-rolled buffer — verified directly against this `httpx`
+  version with a character split deliberately across two raw chunks.
+* **Backend and client timings are read from two different places, never merged.** Ollama's
+  `load_duration`, `prompt_eval_duration`, `eval_duration` and `total_duration` (nanoseconds,
+  converted once) become `Timing.backend_*`; this process's own `client_wall_ms` and
+  `client_ttft_ms` come from `baseaicore.monotonic_ns()` measured from outside the call.
+
+Every unit test for this adapter runs against a recorded transport
+(`tests/fixtures/providers/ollama/`, version-annotated in that directory's `manifest.json`) — the
+default suite needs no Ollama installed. `tests/live/test_ollama_live.py` is the marked exception:
+run `pytest -m live` against a real server to prove the fixtures are still faithful; it skips
+gracefully when none is reachable (`MODELRACK_REQUIRE_OLLAMA=1` turns that skip into a failure, the
+same escape hatch WeightsDB gives its own conditionally-skipped dialect tests).
 
 ## Documentation
 

@@ -1,0 +1,7 @@
+{
+  "model": "qwen3.5:9b-q8_0",
+  "created_at": "2026-08-23T14:10:00.000000000Z",
+  "response": "",
+  "done": true,
+  "done_reason": "unload"
+}
