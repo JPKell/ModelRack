@@ -1,0 +1,26 @@
+: keep-alive
+
+data: {
+data:   "id": "chatcmpl-8f2a1c",
+data:   "object": "chat.completion.chunk",
+data:   "choices": [
+data:     {
+data:       "index": 0,
+data:       "delta": {
+data:         "content": "KV"
+data:       },
+data:       "finish_reason": null
+data:     }
+data:   ]
+data: }
+
+: keep-alive
+
+data: {"id":"chatcmpl-8f2a1c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" caching"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-8f2a1c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" stores values."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-8f2a1c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

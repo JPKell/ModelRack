@@ -37,6 +37,9 @@ if TYPE_CHECKING:
     from baseaicore import Clock
 
 _OLLAMA_FIXTURE_DIR: Final[Path] = Path(__file__).parent / "fixtures" / "providers" / "ollama"
+_OPENAI_COMPATIBLE_FIXTURE_DIR: Final[Path] = (
+    Path(__file__).parent / "fixtures" / "providers" / "openai_compatible"
+)
 
 # A fixed instant with a non-zero millisecond component, so a truncation bug shows up as a changed
 # value rather than hiding behind a round number.
@@ -95,6 +98,25 @@ def load_ollama_fixture() -> Callable[[str], Any]:
         path = _OLLAMA_FIXTURE_DIR / name
         if path.suffix == ".ndjson":
             return path.read_bytes()
+        return json.loads(path.read_text())
+
+    return _load
+
+
+@pytest.fixture
+def load_openai_compatible_fixture() -> Callable[[str], Any]:
+    """Return a loader for one recorded OpenAI-compatible response, by filename.
+
+    Mirrors :func:`load_ollama_fixture` exactly, for the sibling directory Phase 4 adds. Every
+    payload under ``tests/fixtures/providers/openai_compatible/`` is JSON except the ``.sse``
+    files, which are raw server-sent-event text and are returned as-is so a test controls its own
+    chunking, the same reason ``chat_stream.ndjson`` is returned as bytes rather than parsed.
+    """
+
+    def _load(name: str) -> Any:
+        path = _OPENAI_COMPATIBLE_FIXTURE_DIR / name
+        if path.suffix == ".sse":
+            return path.read_text()
         return json.loads(path.read_text())
 
     return _load

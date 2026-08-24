@@ -1,0 +1,10 @@
+data: {"choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]}
+
+data: {"choices": [{"index": 0, "delta": {"tool_calls": [null, {"index": 0, "id": "call_1", "function": {"name": "get_weather", "arguments": "{}"}}]}, "finish_reason": null}]}
+
+data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+
+data: {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}}
+
+data: [DONE]
+

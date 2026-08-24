@@ -51,6 +51,7 @@ from modelrack import (
     ToolDefinition,
 )
 from modelrack.providers.ollama import OllamaProvider
+from modelrack.providers.openai_compatible import OpenAICompatibleProvider
 from modelrack.streaming import CancellationToken
 from modelrack.testing import (
     FULL_CAPABILITIES,
@@ -592,3 +593,41 @@ class TestOllamaProviderConformance(ProviderConformanceSuite):
     @pytest.fixture
     def known_reference(self) -> str:
         return "qwen3.5:9b-q8_0"
+
+
+class TestOpenAICompatibleProviderConformance(ProviderConformanceSuite):
+    """The same suite against
+    :class:`~modelrack.providers.openai_compatible.OpenAICompatibleProvider`.
+
+    Spec §11.5's second proof: this adapter declares a materially different capability set than
+    :class:`~modelrack.providers.ollama.OllamaProvider` — no residency control, no caller-chosen
+    context — which is exactly what exercises the suite's *refusal* branches
+    (``test_residency_control_is_honoured_or_refused``,
+    ``test_a_caller_chosen_context_is_honoured_or_refused``) against a real transport rather than
+    only against :class:`~modelrack.testing.FakeProvider`'s scripted minimal capabilities.
+    """
+
+    @pytest.fixture
+    def provider(self, load_openai_compatible_fixture: Callable[[str], Any]) -> Iterator[Provider]:
+        def chat_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body.get("stream"):
+                return httpx.Response(
+                    200,
+                    content=load_openai_compatible_fixture("chat_stream.sse").encode("utf-8"),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            return httpx.Response(200, json=load_openai_compatible_fixture("chat_complete.json"))
+
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get("http://openai-compatible.conformance.test/v1/models").mock(
+                return_value=httpx.Response(200, json=load_openai_compatible_fixture("models.json"))
+            )
+            mock.post("http://openai-compatible.conformance.test/v1/chat/completions").mock(
+                side_effect=chat_handler
+            )
+            yield OpenAICompatibleProvider(base_url="http://openai-compatible.conformance.test")
+
+    @pytest.fixture
+    def known_reference(self) -> str:
+        return "qwen3.5-9b-instruct-q8_0"

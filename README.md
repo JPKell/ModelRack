@@ -2,13 +2,13 @@
 
 The suite's only model client: a provider-neutral abstraction over local inference runtimes (Ollama first), with a deterministic FakeProvider.
 
-**Status:** `0.3.0` — Phases 1–3 complete. The provider-neutral vocabulary, the streamed-event
+**Status:** `0.4.0` — Phases 1–4 complete. The provider-neutral vocabulary, the streamed-event
 union and the `Provider` protocol exist and type-check; a deterministic, scriptable `FakeProvider`
-ships in `modelrack.testing`; and the first real adapter, `OllamaProvider`, talks to a real Ollama
-server over HTTP — discovery, generation, streaming, tool calls, structured output and residency
-control, all against the same conformance suite the fake proves itself against.
-`OpenAICompatibleProvider` arrives in Phase 4. See the
-[development plan](docs/packages/modelrack/development-plan.md) for what each phase adds.
+ships in `modelrack.testing`; and two real adapters — `OllamaProvider` and
+`OpenAICompatibleProvider` — talk to a real Ollama server and an OpenAI-compatible one (llama.cpp
+server, LM Studio, …) over HTTP, both proven against the same conformance suite the fake proves
+itself against. See [docs/providers.md](docs/providers.md) for the generated capability matrix and
+the [development plan](docs/packages/modelrack/development-plan.md) for what each phase adds.
 
 Part of the **Local AI Suite** — see [docs/architecture/executive-summary.md](docs/architecture/executive-summary.md)
 for how ModelRack fits with the suite's other applications and packages.
@@ -167,6 +167,28 @@ default suite needs no Ollama installed. `tests/live/test_ollama_live.py` is the
 run `pytest -m live` against a real server to prove the fixtures are still faithful; it skips
 gracefully when none is reachable (`MODELRACK_REQUIRE_OLLAMA=1` turns that skip into a failure, the
 same escape hatch WeightsDB gives its own conditionally-skipped dialect tests).
+
+## Talking to an OpenAI-compatible server
+
+`OpenAICompatibleProvider` speaks the same `Provider` protocol over a local llama.cpp server, LM
+Studio, or anything else exposing `/v1/models` and `/v1/chat/completions`:
+
+```python
+from modelrack.providers.openai_compatible import OpenAICompatibleProvider
+
+provider = OpenAICompatibleProvider(base_url="http://127.0.0.1:8080", api_key=None)
+identity = provider.resolve("qwen3.5-9b-instruct-q8_0")
+print(summarize(provider, identity, "a long document"))
+```
+
+Its `capabilities()` is honestly different from Ollama's, not merely a subset asserted the same
+way: no digest anywhere in `/v1/models` (every identity is `NAME_ONLY`), no residency-control
+endpoint (`load`, `unload` and `list_resident` all refuse with `CapabilityUnsupported`), and no
+per-request field to set a served context length (`context_configurable` is `False`, refused
+before a request is sent rather than silently ignored). See
+[docs/providers.md](docs/providers.md) for the full matrix, generated from these adapters' own
+declarations. Fixtures live under `tests/fixtures/providers/openai_compatible/`, representative of
+llama.cpp server and LM Studio; there is no live-server suite for this adapter yet.
 
 ## Documentation
 

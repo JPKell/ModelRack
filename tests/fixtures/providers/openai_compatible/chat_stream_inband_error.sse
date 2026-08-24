@@ -1,0 +1,6 @@
+data: {"choices": [{"index": 0, "delta": {"content": "KV"}, "finish_reason": null}]}
+
+data: {"error": {"message": "generation failed", "code": "internal_error"}}
+
+data: [DONE]
+

@@ -1,0 +1,5 @@
+: ping
+event: message
+data:{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}
+
+data: [DONE]

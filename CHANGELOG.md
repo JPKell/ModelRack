@@ -7,6 +7,71 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-08-23
+
+Phase 4 of the [development plan](docs/packages/modelrack/development-plan.md):
+`OpenAICompatibleProvider`, the second real adapter, and the phase whose whole purpose is proving
+the vocabulary Phase 1 designed is not secretly shaped around Ollama
+([ADR-0007](docs/adr/0007-provider-abstraction.md) rule 1). No type in `modelrack.types`,
+`modelrack.streaming` or `modelrack.provider` changed to support it — the acceptance test the
+design itself was under, stated plainly rather than only implied by a green test suite.
+
+### Added
+- `modelrack.providers.openai_compatible.OpenAICompatibleProvider`: the third `Provider`
+  implementation, reached over `/v1/models` and `/v1/chat/completions`, streaming and not, with
+  tool calls, JSON mode and JSON-Schema structured output. Imported from its own module, the same
+  reason `OllamaProvider` is: it is the second and last place in this package `httpx` is imported.
+- Honest capability declaration where this protocol genuinely differs from Ollama's, each proven
+  by the conformance suite's *refusal* branch rather than only asserted: no digest anywhere in
+  `/v1/models` (`identity_confidence` is `NAME_ONLY` unconditionally —
+  [ADR-0024 §2](docs/adr/0024-canonical-id-and-model-references.md)), no residency-control
+  endpoint (`force_unload` and `residency_query` both `False`; `load`, `unload` and
+  `list_resident` refuse immediately, before any HTTP call), no per-request field to set a served
+  context length (`context_configurable` is `False`, and a request naming one is refused in
+  `_build_body` before a byte is sent — spec §11.10), no backend timing breakdown (every
+  `Timing.backend_*` field is `UNSUPPORTED`; only `client_*` fields are ever set), and
+  `token_level_chunks = False` on principle: nothing in this streaming format promises one delta
+  per model token.
+- A structured error code where Ollama has only prose. `error.code == "context_length_exceeded"`
+  is checked before any message-text sniffing — the same marker-phrase fallback
+  `modelrack.providers._ollama_wire` uses, kept only as the fallback here because this protocol
+  usually has something better.
+- A minimal SSE parser (`_iter_sse_events`) for the one subset of the format this protocol needs:
+  `data:` field lines (joined with `\n` across consecutive lines, per the SSE grammar), a blank
+  line dispatching what was buffered, `:`-prefixed comment lines ignored, and the `[DONE]`
+  sentinel. Verified directly against multi-line data, keep-alive comments, a malformed frame and
+  a stream missing its `[DONE]` sentinel — the development plan's own Phase 4 test list, by name.
+- Streamed tool calls reassembled from fragments that arrive a few characters at a time across
+  many chunks and are not valid JSON until the last one lands — unlike Ollama, whose `arguments`
+  is already a parsed object. A fragment that never becomes valid JSON is preserved as
+  `ToolCall.raw_arguments` and yields empty `arguments` rather than raising, so the
+  malformed-arguments case `modelrack.testing` scripts on purpose stays diagnosable against a real
+  adapter, not just the fake.
+- `tests/fixtures/providers/openai_compatible/`: recorded response shapes representative of
+  llama.cpp server and LM Studio, version-annotated in that directory's `manifest.json` (spec
+  §19), covering discovery, non-streaming and streaming generation (plain and tool-calling),
+  every documented error body, and the SSE edge cases above.
+- `TestOpenAICompatibleProviderConformance` in `tests/contract/test_conformance.py`: the shared
+  behaviour suite, bound to this adapter over a recorded transport. Two real adapters now pass one
+  conformance suite (spec §11.5's acceptance criterion, met a second time).
+- `scripts/generate_providers_doc.py`: regenerates `docs/providers.md`'s capability matrix from
+  each shipped adapter's own `capabilities()` — never hand-written, matching acceptance criterion
+  2 by construction rather than by discipline.
+
+### Changed
+- `modelrack/__init__.py`'s module docstring now names both real adapters and states the
+  no-type-changes result plainly.
+
+### Fixed
+- Nothing shipped in Phase 3 broke; this is new surface, not a repair.
+
+### Security
+- The API key a caller supplies is sent only as `Authorization: Bearer <key>` and confirmed absent
+  from every result's `raw`, from error `details`, and from a DEBUG-level log capture (spec §14) —
+  proven directly rather than only by omission.
+- Reuses `modelrack.providers._http`'s response size caps and connection-pooled client unchanged;
+  no new transport surface was introduced.
+
 ## [0.3.0] — 2026-08-23
 
 Phase 3 of the [development plan](docs/packages/modelrack/development-plan.md): `OllamaProvider`,

@@ -1,0 +1,6 @@
+data: {"choices": [{"index": 0, "delta": {"tool_calls": [{"id": "call_x", "function": {"name": "get_weather", "arguments": "{\"city\": \"Reno\"}"}}]}, "finish_reason": null}]}
+
+data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+
+data: [DONE]
+

@@ -1,0 +1,14 @@
+data: {"id": "chatcmpl-9a3b2d", "object": "chat.completion.chunk", "model": "qwen3.5-9b-instruct-q8_0", "choices": [{"index": 0, "delta": {"role": "assistant", "content": null}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-9a3b2d", "object": "chat.completion.chunk", "model": "qwen3.5-9b-instruct-q8_0", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_7f1a", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-9a3b2d", "object": "chat.completion.chunk", "model": "qwen3.5-9b-instruct-q8_0", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"city\":"}}]}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-9a3b2d", "object": "chat.completion.chunk", "model": "qwen3.5-9b-instruct-q8_0", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": " \"Chicago\"}"}}]}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-9a3b2d", "object": "chat.completion.chunk", "model": "qwen3.5-9b-instruct-q8_0", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+
+data: {"id": "chatcmpl-9a3b2d", "object": "chat.completion.chunk", "model": "qwen3.5-9b-instruct-q8_0", "choices": [], "usage": {"prompt_tokens": 40, "completion_tokens": 12, "total_tokens": 52}}
+
+data: [DONE]
+

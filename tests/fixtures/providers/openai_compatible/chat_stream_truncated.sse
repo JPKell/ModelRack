@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-8f2a1c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-8f2a1c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"KV"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-8f2a1c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" caching"},"finish_reason":null}]}
+

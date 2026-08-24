@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "qwen3.5-9b-instruct-q8_0",
+      "object": "model",
+      "created": 1755878400,
+      "owned_by": "llama.cpp"
+    },
+    {
+      "id": "llama-3.2-3b-instruct-q4_0",
+      "object": "model",
+      "created": 1755792000,
+      "owned_by": "llama.cpp"
+    }
+  ]
+}

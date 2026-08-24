@@ -1,0 +1,6 @@
+data: {"choices": [{"index": 0, "delta": {"content": "KV"}, "finish_reason": null}]}
+
+data: [1, 2, 3]
+
+data: [DONE]
+

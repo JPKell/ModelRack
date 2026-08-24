@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-2c9d4e",
+  "object": "chat.completion",
+  "created": 1755878480,
+  "model": "qwen3.5-9b-instruct-q8_0",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_bad1",
+            "type": "function",
+            "function": {
+              "name": "get_weather",
+              "arguments": "{\"city\": \"Chicago\""
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 40,
+    "completion_tokens": 9,
+    "total_tokens": 49
+  }
+}

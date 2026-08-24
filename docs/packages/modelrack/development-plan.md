@@ -153,16 +153,14 @@ tests/live/test_ollama_live.py           # marked
 `UNSUPPORTED` for anything missing, `raw` preservation, and version-annotated fixtures.
 **Likely failure modes:** treating a missing token count as 0; mislabelling chunk latency as token
 latency; losing the digest and silently producing `name_only` identities.
-**Gold standards:** one Ollama client for the whole suite; unsupported-safe normalization; typed
-errors.
+**Gold standards:** one Ollama client for the whole suite; unsupported-safe normalization; typed errors.
 **Deferred:** OpenAI-compatible adapter; llama.cpp; vLLM.
 
 ---
 
 ## Phase 4 — OpenAICompatibleProvider and capability honesty
 
-**Goal:** a second real adapter proves the abstraction is not Ollama-shaped, and capability
-declarations become load-bearing.
+**Goal:** a second real adapter proves the abstraction is not Ollama-shaped, and capability declarations become load-bearing.
 
 **Prerequisites:** Phase 3.
 

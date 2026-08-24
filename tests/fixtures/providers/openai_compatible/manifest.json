@@ -1,0 +1,7 @@
+{
+  "provider": "openai_compatible",
+  "representative_server": "llama.cpp server (OpenAI-compatible /v1 endpoints)",
+  "server_version": "b3900",
+  "captured": "2026-08-23",
+  "note": "Recorded shapes for modelrack.providers.openai_compatible's conformance and unit tests (spec §19: a provider version bump triggers re-capture and a changelog note). Fixture bodies here are representative payloads matching the documented OpenAI chat-completions wire format that llama.cpp server and LM Studio both implement, not a byte-for-byte capture from a running server — this repository has neither installed. There is no tests/live counterpart for this adapter yet; Phase 4's acceptance criteria are met against these recorded fixtures, the same way Ollama's were before its own live suite existed."
+}

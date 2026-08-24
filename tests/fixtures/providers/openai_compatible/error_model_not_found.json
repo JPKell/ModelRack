@@ -1,0 +1,7 @@
+{
+  "error": {
+    "message": "The model 'no-such-model:v0' does not exist",
+    "type": "invalid_request_error",
+    "code": "model_not_found"
+  }
+}
