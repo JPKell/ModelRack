@@ -2,7 +2,7 @@
 
 [Spec §11.5](../../docs/packages/modelrack/spec.md) — *every adapter passes the same conformance
 suite* — is the sentence this file exists to make true, and
-[testing standards §7](../../docs/standards/testing-standards.md) states it generally: a new
+testing standards §7 states it generally: a new
 provider passes the same suite or it is not a provider.
 
 :class:`ProviderConformanceSuite` holds the behaviours; a subclass binds them to one adapter by

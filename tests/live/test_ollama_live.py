@@ -10,7 +10,7 @@ machine with the hardware:
     pytest -m live
 
 These assert **shape and plausibility**, never exact content
-([testing standards §3](../../docs/standards/testing-standards.md)): a response arrived, token
+(testing standards §3): a response arrived, token
 counts are real numbers, backend timings are non-negative and roughly self-consistent, streaming
 reassembles to what a blocking call would have produced. What they must not do is assert on the
 literal text a model generated — a real model is nondeterministic and this suite never treats one

@@ -10,19 +10,19 @@ The second real adapter, after :mod:`modelrack.providers.ollama` (development pl
 "OpenAICompatibleProvider and capability honesty"). Its job is not merely "support one more
 server" — it is to prove that the vocabulary Phase 1
 designed and Phase 3 exercised against Ollama is not secretly Ollama-shaped
-([ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 1). Nothing in
+(ADR-0007 rule 1). Nothing in
 :mod:`modelrack.types`, :mod:`modelrack.streaming` or :mod:`modelrack.provider` needed to change to
 support this adapter — a fact worth stating plainly because it is the acceptance test the design
 itself was under.
 
 **Honest capability declaration is this module's whole point** (spec §11.10, and
-[ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2). An OpenAI-compatible chat
+ADR-0007 rule 2). An OpenAI-compatible chat
 completions endpoint has:
 
 * No digest for anything it serves — ``/v1/models`` lists an ``id`` and nothing that identifies
   the bytes behind it, so every identity here is
   :attr:`~baseaicore.IdentityConfidence.NAME_ONLY`, permanently
-  ([ADR-0024 §2](../../../docs/adr/0024-canonical-id-and-model-references.md)).
+  (ADR-0024 §2).
 * No endpoint to load, unload or query residency — ``force_unload`` and ``residency_query`` are
   declared ``False``, and :meth:`~OpenAICompatibleProvider.load`,
   :meth:`~OpenAICompatibleProvider.unload` and
@@ -165,7 +165,7 @@ transport chunks" shape [spec §11.4](../../../docs/packages/modelrack/spec.md) 
 to relabel as per-token latency. ``thinking_control`` is ``False``: the chat completions shape has
 no reasoning-content field this adapter reads (some servers add one under a private key; declaring
 the flag ``True`` on the strength of an undocumented extension is exactly the "capability nobody
-tested" [ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2 warns against).
+tested" ADR-0007 rule 2 warns against).
 """
 
 _REQUEST_HEADERS: Final[dict[str, str]] = {"Content-Type": "application/json"}
@@ -373,7 +373,7 @@ class OpenAICompatibleProvider:
         Raises:
             CapabilityUnsupported: Always — ``force_unload`` is declared ``False``, and the
                 normative capability set has no separate "can load" flag
-                ([ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2).
+                (ADR-0007 rule 2).
         """
         self._require_capability("force_unload", "load a model on demand")
 
@@ -856,7 +856,7 @@ def _identity_for(model_id: str) -> ModelIdentity:
     No OpenAI-compatible discovery endpoint reports a content digest for what it is serving, so
     every identity from this adapter carries :attr:`~baseaicore.IdentityConfidence.NAME_ONLY`
     unconditionally, never a fabricated one
-    ([ADR-0024 §2](../../../docs/adr/0024-canonical-id-and-model-references.md)).
+    (ADR-0024 §2).
     """
     return ModelIdentity(ProviderKind.OPENAI_COMPATIBLE, model_id)
 
@@ -1046,7 +1046,7 @@ def _read_usage(payload: Mapping[str, Any], *, text: str) -> GenerationUsage:
     ``prompt_tokens``/``completion_tokens`` map to the billing vocabulary's disjoint classes; this
     protocol reports no cache-aware billing, so both cache classes stay
     :data:`~baseaicore.UNSUPPORTED` rather than an invented zero
-    ([ADR-0016](../../../docs/adr/0016-unavailable-is-not-zero.md)). Character, word and byte
+    (ADR-0016). Character, word and byte
     counts are observations this process can make regardless of what the provider counted.
     """
     usage = payload.get("usage")

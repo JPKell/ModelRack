@@ -7,7 +7,7 @@ nothing about *when* or *whether* it is delivered — that is
 :class:`~modelrack.providers.fake.FakeProvider`'s.
 
 Separated from the provider so neither module is the thousand-line "god module" the
-[coding standards](../../../docs/standards/coding-standards.md) §13 name as an anti-pattern, and
+coding standards §13 name as an anti-pattern, and
 because the seam is real: everything here is a pure function of its arguments and can be reasoned
 about — and tested — without a provider, a call counter or a clock.
 

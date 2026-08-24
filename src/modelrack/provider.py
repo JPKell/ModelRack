@@ -1,7 +1,7 @@
 """Domain module — the ``Provider`` protocol and the types describing what a provider *is*.
 
 Imports :mod:`baseaicore` and this package's own types; performs no I/O. This is the interface
-[ADR-0007](../../docs/adr/0007-provider-abstraction.md) exists to establish: one abstraction,
+ADR-0007 exists to establish: one abstraction,
 several adapters, one conformance suite, so that three applications contain no provider HTTP code
 and cannot disagree about what a token count or a timing means.
 
@@ -13,7 +13,7 @@ present, never that a signature matches.
 
 **Capabilities are declarations, not suggestions.** A caller checks
 :class:`ProviderCapabilities` and branches; it never assumes
-([ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 2). An adapter that cannot do
+(ADR-0007 rule 2). An adapter that cannot do
 something declares ``False`` and raises
 :class:`~modelrack.errors.CapabilityUnsupported` when asked anyway — it never accepts the request
 and quietly ignores it, which would produce a result the caller misreads as the model's own
@@ -52,7 +52,7 @@ class ProviderStatus(StrEnum):
 
     The values match the component statuses every application reports from
     ``GET /api/v1/health``
-    ([Graceful Degradation](../../docs/architecture/graceful-degradation.md)), so an application
+    (Graceful Degradation), so an application
     maps a :class:`ProviderHealth` straight into its health document without
     inventing a translation that could drift.
 
@@ -119,7 +119,7 @@ class ProviderHealth:
 class ProviderCapabilities:
     """What one provider can actually do.
 
-    The field set is normative — [ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 2
+    The field set is normative — ADR-0007 rule 2
     defers to [spec §7](../../docs/packages/modelrack/spec.md) for it, and this dataclass is that
     list. Every flag defaults to ``False``, because the honest default for "did this adapter
     declare it?" is no: a capability that appears by omission is a capability nobody tested.
@@ -141,7 +141,7 @@ class ProviderCapabilities:
         kv_metrics: Reports KV-cache metrics.
         context_configurable: The served context length can be set by the caller. **Load-bearing,
             not informational** ([spec §11.10](../../docs/packages/modelrack/spec.md),
-            [ADR-0023 §4](../../docs/adr/0023-runtime-profile-resolution.md)): it is what tells a
+            ADR-0023 §4): it is what tells a
             caller whether it may set a context or must record the one it got as ``assumed``. An
             adapter that cannot configure context declares ``False`` rather than accepting the
             setting and ignoring it — the latter produces a run whose recorded context never
@@ -179,7 +179,7 @@ class LoadResult:
             no load was observed — never ``0``, which would claim an instantaneous load.
         profile_hash: The :class:`~baseaicore.RuntimeProfile` the model was loaded under, hashed.
             Recorded because the same weights under a different profile are a different
-            measurement subject ([ADR-0023](../../docs/adr/0023-runtime-profile-resolution.md)).
+            measurement subject (ADR-0023).
     """
 
     identity: ModelIdentity
@@ -195,7 +195,7 @@ class ResidentModel:
     Attributes:
         identity: Which weights are resident.
         vram_bytes: Device memory the model occupies. Per device and never summed across a
-            machine ([ADR-0027](../../docs/adr/0027-multi-gpu-semantics.md)).
+            machine (ADR-0027).
         total_bytes: Total memory the model occupies, device and host together.
         expires_at: When the provider intends to evict it, where the provider says so — Ollama's
             ``keep_alive`` produces exactly this. ``None`` when the provider does not schedule
@@ -212,7 +212,7 @@ class ResidentModel:
 class Provider(Protocol):
     """The one interface every model runtime is reached through.
 
-    Synchronous by design ([ADR-0003](../../docs/adr/0003-sync-vs-async-strategy.md)): callers own
+    Synchronous by design (ADR-0003): callers own
     their own concurrency, and this package adds no queueing, no retry and no rate limiting
     ([spec §3](../../docs/packages/modelrack/spec.md)).
 
@@ -225,7 +225,7 @@ class Provider(Protocol):
     Attributes:
         kind: Which sort of provider this is. Reused from :mod:`baseaicore` rather than redefined,
             so the value that reaches a canonical model ID is the same object the adapter declares
-            ([ADR-0008](../../docs/adr/0008-canonical-model-identity.md)).
+            (ADR-0008).
     """
 
     kind: ProviderKind
@@ -291,7 +291,7 @@ class Provider(Protocol):
             The resolved identity, with its digest where the provider exposes one — normalized
             through :func:`baseaicore.normalize_digest`, so a digest that will not normalize
             yields a ``name_only`` identity rather than a malformed one
-            ([ADR-0024 §2](../../docs/adr/0024-canonical-id-and-model-references.md)).
+            (ADR-0024 §2).
 
         Raises:
             ModelNotFound: If nothing matches, or if a prefix matches more than one model — an

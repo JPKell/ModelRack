@@ -7,7 +7,7 @@ process, and why the socket guard in ``tests/conftest.py`` would fail any test h
 to mock one.
 
 The second adapter, after :mod:`modelrack.providers.fake` — first in shipping order, not in
-architectural importance ([ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 6). This
+architectural importance (ADR-0007 rule 6). This
 module is where the vocabulary Phase 1 designed and Phase 2 exercised against a fake meets a real
 runtime's actual, occasionally inconvenient wire format for the first time.
 
@@ -38,7 +38,7 @@ does not re-derive it.
   the same reading.
 
 **Name-based, defensive parsing** is this module's whole strategy against
-[risk register E1](../../../docs/architecture/risk-register.md) ("Ollama API changes"): every
+risk register E1 ("Ollama API changes"): every
 field is read by name, a missing or reshaped one degrades to
 :data:`~baseaicore.UNSUPPORTED` rather than raising or guessing, and every adapter method still
 raises a typed error for what it cannot parse at all — never a raw ``httpx`` exception
@@ -147,7 +147,7 @@ _CAPABILITIES: Final[ProviderCapabilities] = ProviderCapabilities(
 ``logprobs`` and ``kv_metrics`` stay ``False``: neither ``/api/chat`` nor ``/api/generate``
 exposes per-token log probabilities or KV-cache counters in any documented response field, so
 declaring either would be exactly the "capability nobody tested"
-[ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2 warns against. ``embedding`` is
+ADR-0007 rule 2 warns against. ``embedding`` is
 ``False`` because embeddings are out of this package's scope until
 [spec §21](../../../docs/packages/modelrack/spec.md) — Ollama has ``/api/embed``, but nothing in
 the ``Provider`` protocol calls it yet.
@@ -171,7 +171,7 @@ class OllamaProvider:
     Every method raises the typed errors in :mod:`modelrack.errors`, never a raw ``httpx``
     exception (spec §11.7); every unavailable measurement is
     :data:`~baseaicore.UNSUPPORTED`, never ``0``
-    ([ADR-0016](../../../docs/adr/0016-unavailable-is-not-zero.md)).
+    (ADR-0016).
 
     Args:
         base_url: Where Ollama is listening. Validated to an ``http``/``https`` scheme with a
@@ -433,7 +433,7 @@ class OllamaProvider:
             One entry per resident model, sorted by name so two calls agree. Ollama reports one
             VRAM figure per model rather than per device; that figure is passed through as
             ``vram_bytes`` unchanged — this package summing across devices itself is what
-            [ADR-0027](../../../docs/adr/0027-multi-gpu-semantics.md) forbids, not a provider
+            ADR-0027 forbids, not a provider
             choosing to report one number of its own.
 
         Raises:
@@ -796,7 +796,7 @@ class OllamaProvider:
         table names "4xx with a provider message" for :class:`~modelrack.errors.ProviderRejected`,
         but Ollama is not rigorously HTTP-semantic about which status accompanies which failure —
         trusting the status code's exact number over the message it carries would be exactly the
-        version-fragility [risk register E1](../../../docs/architecture/risk-register.md) warns
+        version-fragility risk register E1 warns
         this adapter to avoid. A 503 that says why is more useful classified the same way a
         400 that says why is than downgraded to an opaque
         :class:`~modelrack.errors.ProviderProtocolError` for having the "wrong" status class.
@@ -1027,7 +1027,7 @@ class OllamaProvider:
         Chat-style (``messages``) reaches ``/api/chat``; completion-style (``prompt``) reaches
         ``/api/generate``, which has no concept of tools at all — a request combining ``prompt``
         with ``tools`` is refused here rather than silently dropping the tools, which is the same
-        dishonesty [ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2 forbids for
+        dishonesty ADR-0007 rule 2 forbids for
         an undeclared capability, just discovered at the *combination* rather than the adapter
         level.
         """

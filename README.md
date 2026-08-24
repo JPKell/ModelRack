@@ -7,11 +7,10 @@ union and the `Provider` protocol exist and type-check; a deterministic, scripta
 ships in `modelrack.testing`; and two real adapters — `OllamaProvider` and
 `OpenAICompatibleProvider` — talk to a real Ollama server and an OpenAI-compatible one (llama.cpp
 server, LM Studio, …) over HTTP, both proven against the same conformance suite the fake proves
-itself against. See [docs/providers.md](docs/providers.md) for the generated capability matrix and
-the [development plan](docs/packages/modelrack/development-plan.md) for what each phase adds.
+itself against. See the [development plan](docs/packages/modelrack/development-plan.md) for what
+each phase adds.
 
-Part of the **Local AI Suite** — see [docs/architecture/executive-summary.md](docs/architecture/executive-summary.md)
-for how ModelRack fits with the suite's other applications and packages.
+Part of the **Local AI Suite**.
 
 ## Install
 
@@ -105,7 +104,7 @@ real, passes one conformance suite:
 [`tests/contract/test_conformance.py`](tests/contract/test_conformance.py).
 
 Two rules run through every type here. An unavailable measurement is `UNSUPPORTED`, never `0`
-([ADR-0016](docs/adr/0016-unavailable-is-not-zero.md)) — so a provider that reported no token
+(ADR-0016) — so a provider that reported no token
 counts yields a result that says so rather than one that averages away real throughput. And what a
 provider *reported* about its own work is never merged with what this process *observed*:
 
@@ -122,7 +121,7 @@ transport, scheduling — and a benchmark comparing one runtime's self-report ag
 clock is comparing nothing.
 
 Capabilities are checked, never assumed
-([ADR-0007](docs/adr/0007-provider-abstraction.md) rule 2):
+(ADR-0007 rule 2):
 
 ```python
 def stream_if_possible(provider: Provider) -> bool:
@@ -185,23 +184,18 @@ Its `capabilities()` is honestly different from Ollama's, not merely a subset as
 way: no digest anywhere in `/v1/models` (every identity is `NAME_ONLY`), no residency-control
 endpoint (`load`, `unload` and `list_resident` all refuse with `CapabilityUnsupported`), and no
 per-request field to set a served context length (`context_configurable` is `False`, refused
-before a request is sent rather than silently ignored). See
-[docs/providers.md](docs/providers.md) for the full matrix, generated from these adapters' own
-declarations. Fixtures live under `tests/fixtures/providers/openai_compatible/`, representative of
+before a request is sent rather than silently ignored). Fixtures live under
+`tests/fixtures/providers/openai_compatible/`, representative of
 llama.cpp server and LM Studio; there is no live-server suite for this adapter yet.
 
 ## Documentation
 
-This repository carries its own copy of the relevant suite documentation under [`docs/`](docs/README.md),
-so it can be read and implemented independently of the other eight suite repositories. Start with
-[`docs/README.md`](docs/README.md).
+Project documentation lives under [`docs/`](docs/README.md). Start with [`docs/README.md`](docs/README.md).
 
 | Read this | For |
 |---|---|
 | [docs/packages/modelrack/spec.md](docs/packages/modelrack/spec.md) | Purpose, scope, non-goals, public contracts, configuration, acceptance criteria |
 | [docs/packages/modelrack/development-plan.md](docs/packages/modelrack/development-plan.md) | The phased build plan: goals, work, tests, acceptance criteria per phase |
-| [docs/standards/](docs/standards/) | Coding, testing, security, API, database and packaging standards every phase follows |
-| [docs/adr/](docs/adr/README.md) | The architectural decisions this design rests on |
 
 ## Development
 

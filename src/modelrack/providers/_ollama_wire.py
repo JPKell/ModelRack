@@ -7,7 +7,7 @@ recorded fixture captured, it produces the same result forever, which is what le
 ``tests/unit/test_ollama_adapter.py`` assert against fixtures without a running Ollama.
 
 **Name-based, defensive parsing throughout** — the mitigation
-[risk register E1](../../../docs/architecture/risk-register.md) names for "Ollama API changes":
+risk register E1 names for "Ollama API changes":
 every field is read by name with ``.get()``, a missing or malformed one becomes
 :data:`~baseaicore.UNSUPPORTED` rather than a guess, and :attr:`ModelDescriptor.raw` always keeps
 the untouched payload so a normalizer gap is diagnosable rather than silently lossy.
@@ -143,7 +143,7 @@ def identity_for(name: str, digest: str | None) -> tuple[ModelIdentity, str | No
         A ``(identity, discarded_reason)`` pair. ``discarded_reason`` is ``None`` unless a digest
         was present but would not normalize, in which case the identity is ``name_only`` and the
         reason is set so the loss is diagnosable rather than silent
-        ([ADR-0024 §2](../../../docs/adr/0024-canonical-id-and-model-references.md)).
+        (ADR-0024 §2).
     """
     normalized = normalize_digest(digest)
     if digest is not None and normalized is None:
@@ -248,7 +248,7 @@ def build_resident_model(
         ``(identity, vram_bytes, total_bytes, expires_at)``. Ollama reports one VRAM figure per
         model, not per device — passed through as the single number the provider gave, which is
         not the same thing as this package summing across devices itself
-        ([ADR-0027](../../../docs/adr/0027-multi-gpu-semantics.md) constrains *this package's*
+        (ADR-0027 constrains *this package's*
         arithmetic, not what a provider chooses to report as one figure).
     """
     name = entry.get("name") or entry.get("model") or ""
@@ -284,7 +284,7 @@ def generation_options(
     configures both at server startup (``OLLAMA_FLASH_ATTENTION``, ``OLLAMA_KV_CACHE_TYPE``), not
     per request, and there is no ``options`` key that would make setting one here take effect.
     Inventing one and sending it would claim a promise this adapter cannot keep — the same
-    dishonesty [ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2 forbids for a
+    dishonesty ADR-0007 rule 2 forbids for a
     capability flag. A caller needing either configures the server directly.
 
     ``provider_options`` is merged last and wins on any overlapping key, which is what makes it an
@@ -429,7 +429,7 @@ def read_usage(payload: Mapping[str, Any], *, text: str) -> GenerationUsage:
     ``prompt_eval_count`` and ``eval_count`` are Ollama's token counts, mapped to the billing
     vocabulary's ``input_tokens``/``output_tokens`` — Ollama reports no cache-aware billing, so
     both cache classes stay :data:`~baseaicore.UNSUPPORTED` rather than being invented as zero
-    ([ADR-0016](../../../docs/adr/0016-unavailable-is-not-zero.md)). Character, word and byte
+    (ADR-0016). Character, word and byte
     counts are observations this process can make about the string it is holding regardless of
     what the provider counted, so they are always present.
     """

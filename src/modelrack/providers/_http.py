@@ -19,7 +19,7 @@ message itself preserves it — a leading ``[Errno N]`` where a **negative** ``N
 what it is: message-sniffing, not a structured read. It degrades to
 :attr:`~modelrack.errors.ProviderUnavailableReason.NETWORK_ERROR` rather than guessing when the
 pattern does not match, which is the same discipline
-[ADR-0016](../../../docs/adr/0016-unavailable-is-not-zero.md) applies to every other measurement
+ADR-0016 applies to every other measurement
 this package cannot make honestly.
 """
 

@@ -3,12 +3,12 @@
 Imports :mod:`baseaicore` and the standard library; performs no I/O and reads no clock. These are
 the types three applications exchange with a model runtime, and their whole purpose is that
 FreeWeight, LoadCoach and IdeaPress never see provider JSON
-([ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 1). Every one is a frozen value
+(ADR-0007 rule 1). Every one is a frozen value
 object, because a result that some later code mutates no longer describes the call it came from.
 
 Two rules shape almost every field here:
 
-* **Unavailable is never zero** ([ADR-0016](../../docs/adr/0016-unavailable-is-not-zero.md)). Every
+* **Unavailable is never zero** (ADR-0016). Every
   count and duration defaults to :data:`~baseaicore.UNSUPPORTED`, so a provider that reported
   nothing produces a result that says so. A generation recorded as having taken ``0 ms`` or used
   ``0`` tokens is the exact failure this suite is built to refuse.
@@ -301,7 +301,7 @@ class ResponseFormat:
     Requesting a format a provider has not declared is refused by the adapter with
     :class:`~modelrack.errors.CapabilityUnsupported` rather than silently downgraded, because a
     caller that asked for JSON and received prose would discover it while parsing, one layer too
-    late ([ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 2).
+    late (ADR-0007 rule 2).
 
     Attributes:
         kind: Which shape is being requested.
@@ -341,12 +341,12 @@ class SamplingParameters:
     That is deliberately distinct from sending an explicit value that happens to match the
     default: a run that pinned ``temperature=0.0`` and one that inherited whatever the provider
     chose are not the same experiment, and only the first is reproducible
-    ([Machine Identity §6](../../docs/architecture/machine-identity-and-reproducibility.md)
+    (Machine Identity §6
     requires the *effective* parameters be recorded).
 
     Sampling is **not** part of a :class:`~baseaicore.RuntimeProfile`: these change per request,
     while a runtime profile describes how the model was loaded and served
-    ([ADR-0023](../../docs/adr/0023-runtime-profile-resolution.md)).
+    (ADR-0023).
 
     Attributes:
         temperature: Randomness. ``0`` is the greedy, most reproducible setting.
@@ -466,7 +466,7 @@ class GenerationUsage:
 
     * :attr:`tokens` is BaseAiCore's billing vocabulary, whose four classes are **disjoint** by
       definition so that a cost can be computed without double-billing a cached call
-      ([ADR-0030](../../docs/adr/0030-model-cost-and-pricing.md)). Reconciling each provider's
+      (ADR-0030). Reconciling each provider's
       convention into that shape is the adapter's job — ADR-0030 names it as a conformance test
       case — and a consumer storing a cost stores this object directly.
     * The remaining fields are **observations**, not billing: breakdowns and output sizes the three
@@ -526,12 +526,12 @@ class GenerationRequest:
 
     Attributes:
         identity: Which weights to run
-            ([ADR-0008](../../docs/adr/0008-canonical-model-identity.md)).
+            (ADR-0008).
         messages: The conversation, for a chat-style call.
         prompt: The raw prompt, for a completion-style call.
         runtime_profile: How the model should be loaded and served. Defaults to provider defaults,
             which is itself a legal, hashable profile — there is no "no profile" state
-            ([ADR-0023](../../docs/adr/0023-runtime-profile-resolution.md) §1).
+            (ADR-0023 §1).
         sampling: How the model should sample. Per-request, unlike ``runtime_profile``.
         tools: Tools the model may call. Passing any to a provider that has not declared
             ``tool_calling`` raises :class:`~modelrack.errors.CapabilityUnsupported`.
@@ -602,9 +602,9 @@ class GenerationResult:
             and produced nothing.
         provider_version: The provider's own version, recorded because a provider upgrade is an
             environment drift signal that reduces confidence in evidence measured before it
-            ([ADR-0017](../../docs/adr/0017-benchmark-confidence-and-freshness.md)).
+            (ADR-0017).
         raw: The provider's untouched response, for **diagnostics only**. Reading it for business
-            logic is a boundary violation ([ADR-0007](../../docs/adr/0007-provider-abstraction.md)
+            logic is a boundary violation (ADR-0007
             rule 1); it exists so a surprising result can be explained, and adapters must keep API
             keys out of it (spec §14).
     """

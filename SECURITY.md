@@ -3,8 +3,8 @@
 ModelRack is part of the Local AI Suite, whose default posture is local-first: it binds to
 `127.0.0.1` by default, requires no credentials on loopback, and makes no outbound network
 connections other than to a configured model provider. See
-`docs/standards/security-standards.md` for the full trust-boundary model and
-`docs/adr/0014-authentication-strategy.md` and `docs/adr/0026-local-http-hardening.md` for the
+security standards for the full trust-boundary model and
+0014 authentication strategy and 0026 local http hardening for the
 authentication and LAN-exposure design this component follows.
 
 ## Reporting a vulnerability
@@ -31,9 +31,9 @@ vulnerable dependency versions.
 
 ## Security-relevant design decisions
 
-The rationale for this component's security posture is recorded, not assumed. Start with:
+This component follows these security rules:
 
-* `docs/standards/security-standards.md` — trust boundaries, network exposure, input validation,
+* security standards — trust boundaries, network exposure, input validation,
   filesystem safety, secrets handling.
-* `docs/adr/0014-authentication-strategy.md` — bearer tokens, scopes, loopback-vs-LAN behaviour.
-* `docs/adr/0026-local-http-hardening.md` — Host header validation, CSRF, outbound-fetch allowlisting.
+* 0014 authentication strategy — bearer tokens, scopes, loopback-vs-LAN behaviour.
+* 0026 local http hardening — Host header validation, CSRF, outbound-fetch allowlisting.

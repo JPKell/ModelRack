@@ -1,7 +1,7 @@
 # ModelRack — Specification
 
 **Type:** Python package · **Import/distribution name:** `modelrack` · **Layer:** 3 (capability package)
-**Status:** Specified, not implemented. **Decision record:** [ADR-0007](../../adr/0007-provider-abstraction.md).
+**Status:** Specified, not implemented. **Decision record:** ADR-0007.
 
 ---
 
@@ -34,7 +34,7 @@ timing means.
 * No prompt construction or templating.
 * No queueing, no concurrency control, no rate limiting (callers own their concurrency policy).
 * No model downloading, conversion or quantization.
-* No async API ([ADR-0003](../../adr/0003-sync-vs-async-strategy.md)).
+* No async API (ADR-0003).
 
 ## 4. Responsibilities
 
@@ -146,7 +146,7 @@ inspectable and clearable; it never survives the process.
 
 1. Applications never see provider JSON except through `raw`, which is diagnostics only.
 2. Every unavailable measurement is `UNSUPPORTED`, never zero
-   ([ADR-0016](../../adr/0016-unavailable-is-not-zero.md)).
+   (ADR-0016).
 3. Backend-reported timings and client-observed timings are separate fields and are never merged.
 4. `token_level_chunks` gates any per-token latency claim; when false, inter-chunk latency is exactly
    that, and callers must not relabel it.
@@ -158,11 +158,11 @@ inspectable and clearable; it never survives the process.
 9. Every digest a provider reports is normalized to `"sha256:" + 64 lowercase hex` through
    `baseaicore.normalize_digest`. A digest that will not normalize is discarded with a recorded
    reason, yielding a `name_only` identity rather than a malformed one
-   ([ADR-0024 §2](../../adr/0024-canonical-id-and-model-references.md)). ModelRack is the only place
+   (ADR-0024 §2). ModelRack is the only place
    in the suite that sees a raw provider digest, so it is the only place this can be got right.
 10. `capabilities().context_configurable` is load-bearing, not informational: it is what tells a
    caller whether it may set a served context or must record one as assumed
-   ([ADR-0023 §4](../../adr/0023-runtime-profile-resolution.md)). An adapter that cannot configure
+   (ADR-0023 §4). An adapter that cannot configure
    context declares `False` rather than accepting the setting and ignoring it.
 
 ## 12. Configuration
@@ -181,7 +181,7 @@ application owns configuration.
 | 404 / model missing | `ModelNotFound` | Includes the reference and the known model count |
 | Provider reports a context overflow | `ContextLimitExceeded` | Includes requested and maximum where known |
 | Tools/schema requested but unsupported | `CapabilityUnsupported` | Names the capability |
-| Cancellation token triggered | `GenerationCancelled` | Partial text preserved in `details`. Only reachable from `stream()`; `generate()` offers no boundary at which a token can take effect, which is why LoadCoach always calls `stream()` and assembles the response itself ([LoadCoach API §5](../../apps/loadcoach/api.md)) |
+| Cancellation token triggered | `GenerationCancelled` | Partial text preserved in `details`. Only reachable from `stream()`; `generate()` offers no boundary at which a token can take effect, which is why LoadCoach always calls `stream()` and assembles the response itself (LoadCoach API §5) |
 | 4xx with a provider message | `ProviderRejected` | Provider message preserved verbatim |
 | Stream truncated without a terminal chunk | `ProviderProtocolError` | Partial result preserved |
 
@@ -270,7 +270,7 @@ Coverage floor: **95 %**. The default suite must pass with no Ollama running.
   FreeWeight).
 * `VLLMProvider` including its metrics endpoint (KV-cache utilization, prefix-cache hits).
 * Embeddings API across providers.
-* An async provider API, if [ADR-0003](../../adr/0003-sync-vs-async-strategy.md)'s revisit trigger
+* An async provider API, if ADR-0003's revisit trigger
   fires.
 * Token counting/tokenization where a provider exposes it.
 * Multi-modal inputs (images) once a consumer needs them.

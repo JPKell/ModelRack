@@ -6,7 +6,7 @@ reads them lives in :mod:`modelrack.providers.fake`.
 
 The development plan names one file for Phase 2. These types are separated from the provider that
 interprets them because together they are a thousand-line module — the "god module" the
-[coding standards](../../../docs/standards/coding-standards.md) §13 name as an anti-pattern.
+coding standards §13 name as an anti-pattern.
 :mod:`modelrack.providers.fake` re-exports every name defined here, and
 :mod:`modelrack.testing` is the supported import path, so the split is invisible to callers.
 
@@ -15,7 +15,7 @@ combination the fake could only honour by lying: reasoning content scripted onto
 declares it cannot report reasoning, token counts scripted onto one that declares it reports none,
 a capability declared that the fake has no way to perform. The alternative — accepting the setting
 and quietly dropping it — is the exact failure
-[ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2 forbids in a real adapter, and a
+ADR-0007 rule 2 forbids in a real adapter, and a
 fake that permitted it would teach three applications to expect it.
 """
 
@@ -75,7 +75,7 @@ them for the same reason.
 
 This is the default declaration, so an unscripted :class:`~modelrack.providers.fake.FakeProvider`
 behaves like a capable local runtime. It is also the more forgiving of the two constants, and the
-[audit](../../../docs/reviews/final_architecture_audit.md) §11.3 names a too-forgiving fake as this
+audit §11.3 names a too-forgiving fake as this
 package's residual risk — which is why :data:`MINIMAL_CAPABILITIES` exists one line away.
 """
 
@@ -274,7 +274,7 @@ class FakeModel:
             through :func:`baseaicore.normalize_digest`, and one that will not normalize is
             discarded with a recorded reason, yielding a ``name_only`` identity rather than a
             malformed one
-            ([ADR-0024 §2](../../../docs/adr/0024-canonical-id-and-model-references.md)).
+            (ADR-0024 §2).
             Scripting a bad digest here is how a consumer's ``name_only`` handling gets tested.
         aliases: Other names this model answers to. Resolving through one is recorded, never
             hidden ([spec §11.8](../../../docs/packages/modelrack/spec.md)).
@@ -288,7 +288,7 @@ class FakeModel:
         size_bytes: On-disk size of the weights.
         max_context: The context the model advertises — never the context actually served,
             which is a runtime concern
-            ([ADR-0023 §4](../../../docs/adr/0023-runtime-profile-resolution.md)).
+            (ADR-0023 §4).
         embedding_dim: Hidden dimension.
         layers: Transformer layer count.
         attention_heads: Attention head count.
@@ -301,7 +301,7 @@ class FakeModel:
             been measured doing.
         license_text: The model's licence, where a provider exposes one.
         vram_bytes: Device memory this model occupies once resident. Per device, never summed
-            ([ADR-0027](../../../docs/adr/0027-multi-gpu-semantics.md)).
+            (ADR-0027).
         total_bytes: Device and host memory together once resident.
         load_ms: How long this model takes to load. ``UNSUPPORTED`` produces a
             :class:`~modelrack.provider.LoadResult` that says so rather than one claiming an
@@ -450,7 +450,7 @@ class FakeGeneration:
             derives it from what was actually produced.
         cache_read_tokens: Tokens billed at the cache-hit rate. Subtracted from the derived
             ``input_tokens`` so the four billing classes stay **disjoint**
-            ([ADR-0030](../../../docs/adr/0030-model-cost-and-pricing.md)) — reconciling a
+            (ADR-0030) — reconciling a
             provider's overlapping figures is the adapter's job, and a fake that double-counted
             them would let a consumer's cost arithmetic ship wrong.
         cache_write_tokens: Tokens billed at the cache-creation rate.
@@ -605,7 +605,7 @@ class FakeScript:
         models: The catalogue. May be empty — a runtime with nothing pulled is a real state, and
             the error a caller gets from it should name the count.
         capabilities: What this provider declares. Callers branch on it; they never assume
-            ([ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2).
+            (ADR-0007 rule 2).
         generations: What successive calls do, consumed one per :meth:`generate` or
             :meth:`stream`.
         repeat_final_generation: Whether the last generation answers every call after it. ``True``
@@ -618,7 +618,7 @@ class FakeScript:
         health_latency_ms: How long the health probe took.
         provider_version: The provider's own version. Changing it between two runs is how a
             consumer's environment-drift handling gets tested
-            ([ADR-0017](../../../docs/adr/0017-benchmark-confidence-and-freshness.md)).
+            (ADR-0017).
         base_url: What :meth:`health` reports it contacted. The default names no socket, because
             the fake opens none.
         is_remote: Whether that URL is somewhere other than loopback. Carried so a caller can

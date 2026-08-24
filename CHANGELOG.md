@@ -3,7 +3,7 @@
 All notable changes to `modelrack` are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows
 [Semantic Versioning](https://semver.org/), pre-1.0 per
-`docs/standards/packaging-and-release-standards.md` §3.
+packaging and release standards §3.
 
 ## [Unreleased]
 
@@ -12,7 +12,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 Phase 4 of the [development plan](docs/packages/modelrack/development-plan.md):
 `OpenAICompatibleProvider`, the second real adapter, and the phase whose whole purpose is proving
 the vocabulary Phase 1 designed is not secretly shaped around Ollama
-([ADR-0007](docs/adr/0007-provider-abstraction.md) rule 1). No type in `modelrack.types`,
+(ADR-0007 rule 1). No type in `modelrack.types`,
 `modelrack.streaming` or `modelrack.provider` changed to support it — the acceptance test the
 design itself was under, stated plainly rather than only implied by a green test suite.
 
@@ -24,7 +24,7 @@ design itself was under, stated plainly rather than only implied by a green test
 - Honest capability declaration where this protocol genuinely differs from Ollama's, each proven
   by the conformance suite's *refusal* branch rather than only asserted: no digest anywhere in
   `/v1/models` (`identity_confidence` is `NAME_ONLY` unconditionally —
-  [ADR-0024 §2](docs/adr/0024-canonical-id-and-model-references.md)), no residency-control
+  ADR-0024 §2), no residency-control
   endpoint (`force_unload` and `residency_query` both `False`; `load`, `unload` and
   `list_resident` refuse immediately, before any HTTP call), no per-request field to set a served
   context length (`context_configurable` is `False`, and a request naming one is refused in
@@ -54,10 +54,6 @@ design itself was under, stated plainly rather than only implied by a green test
 - `TestOpenAICompatibleProviderConformance` in `tests/contract/test_conformance.py`: the shared
   behaviour suite, bound to this adapter over a recorded transport. Two real adapters now pass one
   conformance suite (spec §11.5's acceptance criterion, met a second time).
-- `scripts/generate_providers_doc.py`: regenerates `docs/providers.md`'s capability matrix from
-  each shipped adapter's own `capabilities()` — never hand-written, matching acceptance criterion
-  2 by construction rather than by discipline.
-
 ### Changed
 - `modelrack/__init__.py`'s module docstring now names both real adapters and states the
   no-type-changes result plainly.
@@ -141,7 +137,7 @@ that degrades any non-numeric value already covered it.
   message, not only a 4xx. Spec §13's table names "4xx with a provider message", but Ollama is not
   rigorously HTTP-semantic about which status accompanies which failure, and trusting the exact
   status number over the message it carries would be the version-fragility
-  [risk register E1](docs/architecture/risk-register.md) names as this adapter's own biggest risk.
+  risk register E1 names as this adapter's own biggest risk.
   An unexpected status with *no* extractable message still falls back to `ProviderProtocolError`.
 - `list_models()` costs one `/api/show` call per model on top of one `/api/tags` call, which is
   exactly what [spec §15](docs/packages/modelrack/spec.md)'s performance budget already priced in
@@ -164,7 +160,7 @@ that degrades any non-numeric value already covered it.
 
 Phase 2 of the [development plan](docs/packages/modelrack/development-plan.md): `FakeProvider`,
 the first adapter, built before the real one on purpose
-([ADR-0007](docs/adr/0007-provider-abstraction.md) rule 6). From here FreeWeight's runner,
+(ADR-0007 rule 6). From here FreeWeight's runner,
 LoadCoach's executor and IdeaPress's workflows can be developed and tested with no GPU, no model
 and no network.
 
@@ -172,7 +168,7 @@ and no network.
 - `modelrack.testing`: `FakeProvider`, `FakeScript`, `FakeGeneration`, `FakeModel`,
   `FakeToolCall`, `FakeFailure`, `FakeFailureMode`, `FULL_CAPABILITIES`, `MINIMAL_CAPABILITIES`,
   `DEFAULT_MODEL` and `SIMULATED_TOKEN_CHARACTERS`. This is the supported import path the
-  [testing standards](docs/standards/testing-standards.md) §7 name; the fake is deliberately
+  testing standards §7 name; the fake is deliberately
   **not** re-exported from `modelrack` itself, because a test double one autocomplete away from
   the production namespace is one refactor away from inside it.
 - Determinism by construction. Text, chunking, token counts, tool-call identifiers and
@@ -198,7 +194,7 @@ and no network.
   truncated, non-hex, absent — and normalized through `baseaicore.normalize_digest` on the way
   out; one that will not normalize is discarded **with the reason recorded in the descriptor's
   `raw`**, yielding a `name_only` identity rather than a malformed one
-  ([ADR-0024 §2](docs/adr/0024-canonical-id-and-model-references.md)). `resolve()` handles exact
+  (ADR-0024 §2). `resolve()` handles exact
   names, aliases and unique prefixes, refuses an ambiguous prefix rather than choosing, and logs
   the resolution at DEBUG so a retag is never hidden (spec §11.8).
 - The provider conformance suite (`tests/contract/test_conformance.py`), the artifact spec §11.5
@@ -247,13 +243,13 @@ Phase 1 of the [development plan](docs/packages/modelrack/development-plan.md): 
 provider-neutral vocabulary and the `Provider` protocol. No I/O and no adapter — `FakeProvider`
 arrives in Phase 2, `OllamaProvider` in Phase 3, in that order and deliberately, so the rest of the
 suite can be built and tested without a GPU, a model or a running runtime
-([ADR-0007](docs/adr/0007-provider-abstraction.md) rule 6).
+(ADR-0007 rule 6).
 
 ### Added
 - `types`: `Role`, `Message`, `ToolDefinition`, `ToolCall`, `SamplingParameters`,
   `ResponseFormat`/`ResponseFormatKind`, `FinishReason`, `Timing`, `GenerationUsage`,
   `GenerationRequest`, `GenerationResult`. Every count and duration defaults to `UNSUPPORTED`
-  rather than `0` ([ADR-0016](docs/adr/0016-unavailable-is-not-zero.md)), and every value object
+  rather than `0` (ADR-0016), and every value object
   is frozen — a result that later code mutates no longer describes the call it came from.
 - `Timing` keeps the provider's account and this process's observation apart:
   `backend_load_ms`, `backend_prompt_eval_ms`, `backend_decode_ms`, `backend_total_ms`,
@@ -293,7 +289,7 @@ suite can be built and tested without a GPU, a model or a running runtime
 ### Changed
 - `GenerationResult.usage` is a `GenerationUsage`, not a bare `baseaicore.TokenUsage` as spec §7's
   sketch shows. The two documents conflict and the ADR is the newer one:
-  [ADR-0030](docs/adr/0030-model-cost-and-pricing.md) defines `TokenUsage` as **billing**
+  ADR-0030 defines `TokenUsage` as **billing**
   vocabulary whose four classes are disjoint, and BaseAiCore's implementation explicitly declines
   a `thinking_tokens` field because every provider that exposes reasoning tokens bills them at its
   output rate. But FreeWeight's `samples` table, LoadCoach's job rows and IdeaPress's all persist

@@ -11,7 +11,7 @@ The hierarchy exists to make one rule enforceable rather than aspirational —
 [spec §11.7](../../docs/packages/modelrack/spec.md): *no adapter raises a raw* ``httpx``
 *exception*. An application that sees a ``httpx.ConnectError`` has been handed a transport detail
 it cannot act on and cannot map to a documented code, and the audit behind
-[ADR-0007](../../docs/adr/0007-provider-abstraction.md) found exactly that in the prior
+ADR-0007 found exactly that in the prior
 implementations. Translation happens once, here, at the only layer that knows what the transport
 was doing.
 
@@ -21,7 +21,7 @@ caller decides: retry policy is LoadCoach's, and a benchmark that silently subst
 string for a failed generation would score a model on a response it never produced.
 
 **Security.** ``details`` travels into API error envelopes, so it must never carry an API key, a
-prompt, or generated content (``docs/standards/security-standards.md``; spec §14). Adapters put
+prompt, or generated content (security standards; spec §14). Adapters put
 the *shape* of a failure here — a URL, a limit, a status code — never its content. The one
 deliberate exception is :class:`GenerationCancelled`, whose partial text is the caller's own
 output being handed back to it.
@@ -90,7 +90,7 @@ class ProviderUnavailable(ProviderError):
     """The provider could not be reached at all: refused, unresolvable, or otherwise unreachable.
 
     ``details`` carries ``base_url`` — spec §13 requires it, and
-    [Graceful Degradation](../../docs/architecture/graceful-degradation.md) requires that a
+    Graceful Degradation requires that a
     *remote* provider's failure name the host so egress is obvious rather than silent. It also
     carries ``reason`` (a :class:`ProviderUnavailableReason`) where the adapter could classify the
     failure.
@@ -111,8 +111,8 @@ class ProviderTimeout(ProviderError):
     stalled — and the first is a configuration fix while the second is not.
 
     A timed-out sample is recorded as ``timeout`` and **never as a score of zero**
-    ([Graceful Degradation](../../docs/architecture/graceful-degradation.md);
-    [ADR-0016](../../docs/adr/0016-unavailable-is-not-zero.md)).
+    (Graceful Degradation;
+    ADR-0016).
     """
 
     code: ClassVar[str] = "PROVIDER_TIMEOUT"
@@ -172,7 +172,7 @@ class CapabilityUnsupported(ProviderError):
 
     This is the error a caller should never see if it checked
     :meth:`~modelrack.provider.Provider.capabilities` first — it exists to make the failure loud
-    for callers that did not ([ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 2).
+    for callers that did not (ADR-0007 rule 2).
     """
 
     code: ClassVar[str] = "CAPABILITY_UNSUPPORTED"

@@ -12,7 +12,7 @@ The golden values in :class:`TestDeterminism` are contracts, not conveniences. A
 fails is indistinguishable at the terminal from a golden test that needs updating, and the
 discipline of never "updating a golden to make CI green" is what makes "identical across processes
 and platforms" mean anything at all — the vocabulary and the derivation are as much a published
-shape as a wire format ([audit §11.3](../../docs/reviews/final_architecture_audit.md)).
+shape as a wire format (audit §11.3).
 """
 
 from __future__ import annotations

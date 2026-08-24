@@ -16,20 +16,18 @@ pre-commit install
 
 ## Required reading, in order
 
-1. This component's `docs/packages/*/spec.md` — purpose, scope, non-goals, contracts.
+1. This component's spec — purpose, scope, non-goals, contracts.
 2. `development-plan.md` in the same folder — the phase you are implementing, its acceptance criteria and its tests.
-3. `docs/standards/coding-standards.md` and `docs/standards/testing-standards.md`.
-4. Any ADR referenced from the phase you are working on (`docs/adr/`).
 
 ## Rules that apply to every change here
 
-* Follow the architecture's dependency direction (`docs/architecture/dependency-and-boundary-rules.md`).
+* Follow the architecture's dependency direction.
   This repository's `.importlinter` enforces it in CI; do not weaken that file to make an import work.
 * No business logic in a route handler or CLI command body — both call one service method and render
-  (`docs/architecture/master-architecture.md` §4).
+.
 * An unavailable measurement is `Unsupported`, never zero, never `None` used as a substitute
-  (`docs/adr/0016-unavailable-is-not-zero.md`).
-* Prompts are versioned JSON records, not Python string literals (`docs/adr/0012-prompt-storage-format.md`).
+.
+* Prompts are versioned JSON records, not Python string literals.
 * Every phase's acceptance criteria in `development-plan.md` must be demonstrable, not merely
   test-covered — the plan states what to run and what a person should see.
 

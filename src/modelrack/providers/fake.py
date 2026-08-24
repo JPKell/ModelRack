@@ -3,10 +3,10 @@
 Imports :mod:`baseaicore`, this package's own types and the standard library. It opens no socket,
 reads no environment and needs no model, which is what makes the suite's default test suite pass
 "with no GPU, no Ollama, no network"
-([testing standards §3](../../../docs/standards/testing-standards.md), gold standard G9).
+(testing standards §3, gold standard G9).
 
 Built **before** the Ollama adapter, deliberately
-([ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 6): FreeWeight's runner,
+(ADR-0007 rule 6): FreeWeight's runner,
 LoadCoach's executor and IdeaPress's workflows are all developed against this, so it has to exist
 before the thing it stands in for. It is shipped API, not a test helper — the supported import
 path is :mod:`modelrack.testing`.
@@ -19,7 +19,7 @@ one is forbidden to do too:
   includes ``context_configurable``, which is load-bearing rather than informational
   ([spec §11.10](../../../docs/packages/modelrack/spec.md)).
 * A measurement it does not have is ``UNSUPPORTED``, never ``0``
-  ([ADR-0016](../../../docs/adr/0016-unavailable-is-not-zero.md)). With ``token_counts``
+  (ADR-0016). With ``token_counts``
   undeclared, every token count is absent — not a plausible-looking number.
 * What it *observed* and what it *claims to have spent* stay in separate fields. Client timings
   come from the scripted delays because the fake really did simulate them; ``backend_*`` fields
@@ -27,7 +27,7 @@ one is forbidden to do too:
   account of work it did not do.
 * A digest that will not normalize is discarded with a recorded reason and yields a ``name_only``
   identity, never a malformed one
-  ([ADR-0024 §2](../../../docs/adr/0024-canonical-id-and-model-references.md)).
+  (ADR-0024 §2).
 * Every stream ends with exactly one terminal event. **Cancellation is delivered as**
   :class:`~modelrack.streaming.StreamFailed`, not raised through the iterator: a raise mid-drain
   ends the stream without a terminal event, which is precisely how :mod:`modelrack.streaming`
@@ -37,7 +37,7 @@ one is forbidden to do too:
 
 The named risk for this phase is a fake more forgiving than the runtime it replaces, which would
 hide a real integration bug in three applications for months
-([audit §11.3](../../../docs/reviews/final_architecture_audit.md)). The mitigations are structural
+(audit §11.3). The mitigations are structural
 rather than aspirational: the nasty cases are first-class script members
 (:class:`~modelrack.providers._fake_script.FakeFailureMode`), the weakest possible declaration is
 one constant away (:data:`~modelrack.providers._fake_script.MINIMAL_CAPABILITIES`), the script
@@ -46,7 +46,7 @@ runs against the recorded Ollama and OpenAI-compatible transports in Phases 3 an
 
 **Where things live.** The development plan names one file for this phase; it is three, because
 one would be the thousand-line "god module" the
-[coding standards](../../../docs/standards/coding-standards.md) §13 name as an anti-pattern, and
+coding standards §13 name as an anti-pattern, and
 because each seam is real. ``_fake_script`` holds the declarative value objects a test writes
 down, ``_fake_generation`` the pure functions that turn a script, a seed and a request into
 content, and this module the provider that decides when — and whether — that content is delivered.
@@ -380,7 +380,7 @@ class FakeProvider:
         people actually type. Whichever route it took, the identity that comes back carries the
         provider's own model name and the digest the catalogue holds, so an identity resolved from
         a tag that has been repointed says ``name_only`` rather than pretending to pin weights it
-        cannot prove ([ADR-0024 §2](../../../docs/adr/0024-canonical-id-and-model-references.md)).
+        cannot prove (ADR-0024 §2).
         A resolution that changed the reference is logged at DEBUG.
 
         Args:
@@ -491,7 +491,7 @@ class FakeProvider:
             identity: The model to load.
             profile: How it should be loaded and served. Recorded as its hash on the result,
                 because the same weights under a different profile are a different measurement
-                subject ([ADR-0023](../../../docs/adr/0023-runtime-profile-resolution.md)).
+                subject (ADR-0023).
 
         Returns:
             What happened. ``load_ms`` is ``UNSUPPORTED`` when the model was already resident —
@@ -501,7 +501,7 @@ class FakeProvider:
         Raises:
             CapabilityUnsupported: If ``force_unload`` is not declared. The normative
                 capability set has no separate "can load" flag —
-                [ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2 fixes the field
+                ADR-0007 rule 2 fixes the field
                 list — so ``force_unload`` is read as the single statement that residency is
                 controllable at all. Inventing a fourteenth flag here would change a dataclass
                 three applications code against; Phase 4 revisits it against a real provider that
@@ -595,7 +595,7 @@ class FakeProvider:
         Refused here rather than attempted and quietly degraded: an adapter that accepted a tool
         definition and dropped it would produce a result whose ``finish_reason`` never mentions
         tools, and the caller would read that as the model choosing not to call one
-        ([ADR-0007](../../../docs/adr/0007-provider-abstraction.md) rule 2).
+        (ADR-0007 rule 2).
         """
         if getattr(self._script.capabilities, capability):
             return
@@ -652,7 +652,7 @@ class FakeProvider:
         :func:`baseaicore.normalize_digest`, and one that will not normalize is dropped with a
         reason rather than stored malformed, yielding a ``name_only`` identity that carries the
         permanent caveat it has earned
-        ([ADR-0024 §2](../../../docs/adr/0024-canonical-id-and-model-references.md)).
+        (ADR-0024 §2).
         """
         normalized = normalize_digest(model.digest)
         if model.digest is not None and normalized is None:
@@ -752,7 +752,7 @@ class FakeProvider:
 
         Checked only when the caller actually set a context, and therefore only on a provider that
         declared ``context_configurable`` — the flag having already been enforced. This is the
-        honest half of [ADR-0023 §4](../../../docs/adr/0023-runtime-profile-resolution.md): a
+        honest half of ADR-0023 §4: a
         provider that accepts a served context is a provider that can be asked for more than it
         will serve.
         """
@@ -894,7 +894,7 @@ class FakeProvider:
 
         ``thinking_tokens`` and ``tool_tokens`` are breakdowns *of* ``output_tokens``, never a
         fifth and sixth billing class: every provider that exposes reasoning tokens bills them at
-        its output rate ([ADR-0030](../../../docs/adr/0030-model-cost-and-pricing.md)), so adding
+        its output rate (ADR-0030), so adding
         them to a total computed from ``tokens`` would count them twice.
         """
         capabilities = self._script.capabilities

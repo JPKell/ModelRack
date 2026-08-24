@@ -110,14 +110,14 @@ timings and digests captured.
   heads, head dimension, embedding dimension, vocab size, licence — with `raw` preserved. **Digests
   normalized through `baseaicore.normalize_digest`** to `"sha256:" + 64 lowercase hex`; a value that
   will not normalize is discarded with a reason and yields a `name_only` identity, never a malformed
-  one ([ADR-0024 §2](../../adr/0024-canonical-id-and-model-references.md)).
+  one (ADR-0024 §2).
 * Timing extraction: `load_duration`, `prompt_eval_duration`, `eval_duration`, `total_duration`
   mapped to `Timing.backend_*`; client-observed wall time and TTFT measured with
   `time.perf_counter_ns()` into `Timing.client_*`.
 * Error translation for every row of the spec's §13 table.
 * Capability declaration for Ollama, including `token_level_chunks` and `context_configurable` set
   truthfully — the latter is what tells a caller whether it may set a served context or must record
-  one as assumed ([ADR-0023 §4](../../adr/0023-runtime-profile-resolution.md)).
+  one as assumed (ADR-0023 §4).
 * Recorded fixtures captured from Ollama 0.32.13, each annotated with the provider version.
 
 **Files/subsystems**
@@ -177,7 +177,6 @@ latency; losing the digest and silently producing `name_only` identities.
 src/modelrack/providers/openai_compatible.py
 tests/unit/test_openai_compatible_adapter.py
 tests/fixtures/providers/openai_compatible/*
-docs/providers.md                 # capability matrix across adapters
 ```
 
 **Tests**
@@ -189,8 +188,7 @@ docs/providers.md                 # capability matrix across adapters
 
 **Acceptance criteria**
 1. Two real adapters pass one conformance suite.
-2. The capability matrix in `docs/providers.md` is generated from the adapters' declarations, not
-   hand-written.
+2. Provider capabilities are derived from the adapters' declarations, not hand-written.
 3. Any type changes required by this adapter are made and documented in the changelog.
 
 **Known risks:** the lowest-common-denominator temptation — flattening the abstraction until Ollama's
@@ -221,7 +219,7 @@ rich data is lost. Mitigated by capability flags plus `UNSUPPORTED`, never by re
 src/modelrack/{residency.py,cache.py,events.py}
 tests/unit/{test_residency,test_cancellation,test_cache}.py
 tests/performance/test_overhead.py
-docs/{quickstart.md,providers.md}
+docs/quickstart.md
 ```
 
 **Tests**

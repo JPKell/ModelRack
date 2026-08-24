@@ -12,7 +12,7 @@ vocabulary, the streamed-event union with its cancellation token, the ``Provider
 types describing what a provider is, and the full error hierarchy.
 
 The first adapter that ships is the **fake** one, deliberately
-([ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 6): ``FakeProvider`` is imported from
+(ADR-0007 rule 6): ``FakeProvider`` is imported from
 ``modelrack.testing``, not from here, so that the rest of the suite can be developed and tested
 without a GPU, a model or a running runtime, while a test double stays one import away from the
 production namespace rather than inside it. The first *real* adapter,
@@ -36,7 +36,7 @@ Anything not listed in ``__all__`` is private and may change without a version b
     True
 
 Two invariants run through every type here. An unavailable measurement is ``UNSUPPORTED``, never
-``0`` ([ADR-0016](../../docs/adr/0016-unavailable-is-not-zero.md)); and what a provider *reported*
+``0`` (ADR-0016); and what a provider *reported*
 about its own work is never merged with what this process *observed*, which is why
 :class:`Timing` prefixes every field and offers no combined duration.
 """

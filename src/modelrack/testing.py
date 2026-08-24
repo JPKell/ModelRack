@@ -2,9 +2,9 @@
 
 Shipped API, not a test-suite helper. FreeWeight's benchmark runner, LoadCoach's job executor and
 IdeaPress's workflows are all developed and tested against what is exported here, which is why the
-[testing standards](../../docs/standards/testing-standards.md) §7 name this module as the one
+testing standards §7 name this module as the one
 place a model provider is replaced from — and why it is built before the Ollama adapter rather
-than after it ([ADR-0007](../../docs/adr/0007-provider-abstraction.md) rule 6).
+than after it (ADR-0007 rule 6).
 
     >>> from modelrack.testing import FakeProvider, FakeScript
     >>> provider = FakeProvider(FakeScript(), seed=7)
@@ -21,7 +21,7 @@ Everything here is deterministic given a script and a seed, and honest about wha
 a capability the script does not declare is refused with
 :class:`~modelrack.errors.CapabilityUnsupported`, and a measurement the fake does not have is
 ``UNSUPPORTED`` rather than a plausible number
-([ADR-0016](../../docs/adr/0016-unavailable-is-not-zero.md)). Reach for
+(ADR-0016). Reach for
 :data:`MINIMAL_CAPABILITIES` when a consumer needs testing against the weakest provider it must
 survive; that swap is one line precisely so it actually gets made.
 """
