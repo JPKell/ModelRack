@@ -86,8 +86,14 @@ markers = [
 testpaths = ["tests"]
 
 [tool.coverage.run]
-source = ["src/modelrack"]
+# The importable name, not the source path: CI installs the built distribution rather than an
+# editable checkout (Packaging Standards §4), so coverage must find the package wherever it is
+# installed. `paths` folds the two locations into one name in the report.
+source = ["modelrack"]
 branch = true
+
+[tool.coverage.paths]
+source = ["src/modelrack", "*/site-packages/modelrack"]
 
 [tool.coverage.report]
 # Spec §18 and acceptance criterion 7 both say 95; the scaffold shipped 85.

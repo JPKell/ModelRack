@@ -24,8 +24,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -e ".[dev]"
-      # Spec §15's overhead budgets, measured against a transport that does no I/O, so what the
+      - run: pip install --require-hashes -r requirements/ci.lock
+      - run: pip install . --no-deps
+      # Spec §15's timing budgets, measured against a transport that does no I/O, so what the
       # clock sees is this package's own work rather than a provider's.
       - run: pytest -m performance -p no:randomly
 
@@ -39,7 +40,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -e ".[dev]"
+      - run: pip install --require-hashes -r requirements/ci.lock
+      - run: pip install . --no-deps
       # MODELRACK_REQUIRE_OLLAMA=1 turns an unreachable provider from a skip into a failure: a
       # silently skipped provider is an untested provider, and a nightly hardware job is exactly
       # where that must not be allowed to hide.

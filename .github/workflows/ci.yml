@@ -12,7 +12,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install ruff
+      # The locked ruff, not whatever released this morning: formatting changes between ruff
+      # versions, and an unpinned job turns that into a red build with no commit behind it.
+      - run: pip install --require-hashes -r requirements/ci.lock
       - run: ruff format --check .
 
   lint:
@@ -21,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install ruff
+      - run: pip install --require-hashes -r requirements/ci.lock
       - run: ruff check .
 
   types:
@@ -30,7 +32,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -e ".[dev]"
+      - run: pip install --require-hashes -r requirements/ci.lock
+      - run: pip install . --no-deps
       - run: mypy src tests
 
   boundaries:
@@ -39,7 +42,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -e ".[dev]"
+      - run: pip install --require-hashes -r requirements/ci.lock
+      - run: pip install . --no-deps
       - run: lint-imports
 
   tests:
@@ -51,7 +55,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "${{ matrix.python-version }}" }
-      - run: pip install -e ".[dev]"
+      - run: pip install --require-hashes -r requirements/ci.lock
+      - run: pip install . --no-deps
       - run: pytest -m "not live and not performance" --cov --cov-report=xml
 
   tests-314-early-warning:
@@ -61,6 +66,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.14" }
+      # Deliberately unpinned: ci.lock is resolved on 3.13, and pinning a version that has no
+      # 3.14 wheels would defeat the purpose of an early warning. This job asks whether the
+      # ranges in pyproject.toml still resolve and pass on the next interpreter.
       - run: pip install -e ".[dev]"
       - run: pytest -m "not live and not performance"
 
@@ -71,7 +79,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -e ".[dev]"
+      - run: pip install --require-hashes -r requirements/ci.lock
+      - run: pip install . --no-deps
       - run: pytest -m "not live and not performance" --cov --cov-report=term-missing --cov-fail-under=95
 
   contracts:
@@ -80,7 +89,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install -e ".[dev]"
+      - run: pip install --require-hashes -r requirements/ci.lock
+      - run: pip install . --no-deps
       - run: pytest -m contract
 
   security:
@@ -90,7 +100,10 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pip-audit
-      - run: pip-audit
+      # Audit the locked sets, not the job's own environment: a bare `pip-audit` here would
+      # inspect an environment containing only pip-audit itself (Security Standards §11).
+      - run: pip-audit --require-hashes -r requirements/ci.lock
+      - run: pip-audit --require-hashes -r requirements/release.lock
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -101,8 +114,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install build twine
-      - run: python -m build
+      - run: pip install --require-hashes -r requirements/release.lock
+      - run: python -m build --no-isolation
       - run: twine check dist/*
       - uses: actions/upload-artifact@v4
         with: { name: dist, path: dist/ }

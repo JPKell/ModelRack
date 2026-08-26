@@ -11,14 +11,19 @@ permissions:
 
 jobs:
   release:
+    # Tag pushes only. Without this, clicking "Run workflow" for the TestPyPI dry run below would
+    # also fire this job and publish to real PyPI — the exact opposite of a dry run.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: pypi   # must match the Environment name set on the PyPI trusted publisher
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install build twine
-      - run: python -m build
+      # Byte-for-byte the dry run's build chain below. A real release that resolved `build` and
+      # `hatchling` fresh from PyPI would not be the artifact the dry run proved.
+      - run: pip install --require-hashes -r requirements/release.lock
+      - run: python -m build --no-isolation
       - run: twine check dist/*
       - run: pip install "dist/$(ls dist | grep .whl)[dev]"
       - run: pytest -m "not live and not performance"
@@ -32,8 +37,9 @@ jobs:
 
   publish-testpypi:
     # Manual only, via Actions -> Release -> Run workflow. Packaging and Release Standards §6
-    # requires a successful TestPyPI publish ahead of a package's first real release; run this
-    # once before tagging v0.4.0. Later releases may skip it, or use it again as a dry run.
+    # requires a successful TestPyPI publish ahead of a package's first real release; 0.5.0 is
+    # this package's first published version, so run this once before tagging v0.5.0. Later
+    # releases may skip it, or use it again as a dry run.
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:

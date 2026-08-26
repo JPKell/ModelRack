@@ -1,0 +1,6 @@
+# Build and publish toolchain for a tagged release (Packaging and Release Standards §4).
+# hatchling is listed explicitly because the release builds with `--no-isolation`, so the backend
+# comes from this lock rather than being re-resolved from PyPI at build time.
+build
+hatchling
+twine
