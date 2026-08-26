@@ -172,6 +172,37 @@ class TestHealthAndCapabilities:
         with pytest.raises(ValidationError):
             OpenAICompatibleProvider(base_url=bad_url)
 
+    @respx.mock
+    def test_health_reports_degraded_when_the_credential_is_rejected(self) -> None:
+        """A wrong or expired ``api_key`` is a 401 from a server running perfectly well.
+        Reporting that as "unreachable" would send an operator to check the wrong thing, and
+        raising would turn one bad credential into a 500 for the caller's whole health endpoint.
+        """
+        respx.get(f"{_BASE_URL}/v1/models").mock(
+            return_value=httpx.Response(401, json={"error": {"message": "invalid api key"}})
+        )
+
+        health = _provider(api_key="sk-expired-4a1f").health()  # noqa: S106
+
+        assert health.status is ProviderStatus.DEGRADED
+        assert "PROVIDER_REJECTED" in health.detail
+
+    @respx.mock
+    def test_a_degraded_health_detail_leaks_neither_the_key_nor_the_servers_message(self) -> None:
+        """Spec §14 names `raw`, error `details` and the DEBUG log. A health document is rendered
+        into a UI, which makes it the fifth channel the same discipline has to hold on.
+        """
+        respx.get(f"{_BASE_URL}/v1/models").mock(
+            return_value=httpx.Response(
+                401, json={"error": {"message": "key sk-expired-4a1f is not valid"}}
+            )
+        )
+
+        health = _provider(api_key="sk-expired-4a1f").health()  # noqa: S106
+
+        assert "sk-expired-4a1f" not in health.detail
+        assert "not valid" not in health.detail
+
 
 class TestApiKey:
     """Spec §14: sent only in the header, never logged, never in diagnostics."""

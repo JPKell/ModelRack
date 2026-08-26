@@ -1,7 +1,7 @@
 # ModelRack — Development Plan
 
 **Sequence position:** third component. Depends on BaseAiCore Phase 4.
-**Target:** `modelrack 0.5.0` by the end of Phase 5.
+**Target:** `modelrack 0.5.0` by the end of Phase 5. **Reached 2026-08-26** — all five phases complete.
 
 The ordering is deliberate and inherited from the prior project's best decision: **the fake provider
 is built before the real one**, so that every downstream component can be developed and tested
@@ -177,6 +177,7 @@ latency; losing the digest and silently producing `name_only` identities.
 src/modelrack/providers/openai_compatible.py
 tests/unit/test_openai_compatible_adapter.py
 tests/fixtures/providers/openai_compatible/*
+docs/providers.md                 # capability matrix across adapters
 ```
 
 **Tests**
@@ -188,7 +189,8 @@ tests/fixtures/providers/openai_compatible/*
 
 **Acceptance criteria**
 1. Two real adapters pass one conformance suite.
-2. Provider capabilities are derived from the adapters' declarations, not hand-written.
+2. The capability matrix in `docs/providers.md` is generated from the adapters' declarations, not
+   hand-written.
 3. Any type changes required by this adapter are made and documented in the changelog.
 
 **Known risks:** the lowest-common-denominator temptation — flattening the abstraction until Ollama's
@@ -219,7 +221,7 @@ rich data is lost. Mitigated by capability flags plus `UNSUPPORTED`, never by re
 src/modelrack/{residency.py,cache.py,events.py}
 tests/unit/{test_residency,test_cancellation,test_cache}.py
 tests/performance/test_overhead.py
-docs/quickstart.md
+docs/{quickstart.md,providers.md}
 ```
 
 **Tests**

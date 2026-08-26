@@ -1,7 +1,8 @@
 # ModelRack — Specification
 
 **Type:** Python package · **Import/distribution name:** `modelrack` · **Layer:** 3 (capability package)
-**Status:** Specified, not implemented. **Decision record:** ADR-0007.
+**Status:** Phases 1–5 implemented in `modelrack 0.5.0`; every §20 acceptance criterion met.
+**Decision record:** ADR-0007.
 
 ---
 

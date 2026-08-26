@@ -7,6 +7,174 @@ packaging and release standards §3.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-26
+
+Phase 5 of the [development plan](docs/packages/modelrack/development-plan.md), and the last one:
+residency, cancellation hardening, the metadata cache and the observability hook. Every acceptance
+criterion in [spec §20](docs/packages/modelrack/spec.md) is now met, which makes this release the
+one where `modelrack` stops being a package under construction and starts being the thing
+FreeWeight, LoadCoach and IdeaPress are built against.
+
+The theme of the phase is that four features which each *look* like a convenience are, at this
+layer, promises a scheduler builds on. A metadata cache that served a stale digest would let a run
+record weights that never ran. A cancelled stream that leaked its socket would take a worker down
+after a few hundred jobs rather than immediately. An `unload` that quietly did nothing would leave
+LoadCoach believing it had freed VRAM it had not. Each is implemented as the guarantee rather than
+the convenience, and each has a test that fails when the guarantee stops holding.
+
+### Added
+- `modelrack.residency`: the residency vocabulary every adapter and every caller shares.
+  `residency_support()` projects a provider's declaration into `ResidencySupport(can_query,
+  can_control)`, so LoadCoach's rule that "providers without residency control simply skip all of
+  this" is a one-line branch taken *before* spending a call rather than a `try` around an
+  operation the caller already knew would be refused. `find_resident()` and `is_resident()` match
+  on the provider-side model name alone — the only field a provider's residency report and a
+  caller's `ModelIdentity` genuinely agree on, since a provider does not re-derive a digest for
+  what it has loaded (ADR-0024 §2), and comparing whole identities would report a digest-pinned
+  identity as *not* resident against the very entry running it.
+- `modelrack.cache`: `MetadataCache`, the one cache [spec §3](docs/packages/modelrack/spec.md)
+  carves out of its own prohibition — in-memory, TTL-bounded (default 300 s), thread-safe,
+  inspectable through `CacheStats` and clearable. Its clock is monotonic and injected: a TTL
+  measured against the wall clock is extended or expired by an NTP correction, and a five-minute
+  expiry asserted with a real `sleep` is a test nobody runs. `MetadataSnapshot` pairs a payload
+  with the instant it was read, because caching the payload alone would falsify
+  `ModelDescriptor.observed_at`, whose documented meaning is *when this snapshot was read from
+  the provider*.
+- `modelrack.events`: the optional `on_event` hook [spec §17](docs/packages/modelrack/spec.md)
+  asks for — `ProviderEvent`, `ProviderEventKind`, `EventEmitter` and `emit()`. An event carries
+  no prompt, no generated text, no tool arguments and no credential, and the enforcement is
+  structural: there is no field one could reach. What it does carry is the caller's own
+  `GenerationRequest.metadata`, the mapping that is never sent to the provider, which is how a
+  host joins an event to its own run without this package knowing what a run is.
+- `refresh: bool = False` on `Provider.list_models`, `inspect_model` and `resolve`, implemented by
+  all three adapters. The development plan names the stale-digest failure mode and its mitigation
+  as "TTL **plus** an explicit `refresh=True` path": a tag such as `qwen3.5:latest` can be
+  repointed the moment after it is read, so a caller who *knows* a model was re-pulled says so
+  rather than waiting out an expiry. An adapter that caches nothing accepts the argument and
+  ignores it, so a caller holding a `Provider` never has to ask which kind it is holding.
+- `metadata_ttl_seconds` and `on_event` constructor arguments on `OllamaProvider` and
+  `OpenAICompatibleProvider`; `on_event` on `FakeProvider`. Configuration stays constructor-only
+  ([spec §12](docs/packages/modelrack/spec.md)): this package still reads no environment variable
+  and no file.
+- `metadata_cache_ttl_seconds`, `metadata_cache_stats()` and `clear_metadata_cache()` on both real
+  adapters — spec §10's requirement that the cache be documented, inspectable and clearable.
+- `modelrack.provider.require_capability()` and `refuse_capability()`: one spelling of ADR-0007
+  rule 2's refusal, shared by every adapter. The message, the error type and — most of all —
+  `details["capability"]` are now identical from all three, which a new test asserts directly:
+  a downstream test that matches on a refusal must not pass against the fake and fail against
+  Ollama.
+- `tests/unit/test_cancellation.py`, and with it acceptance criterion 5. A counting
+  `httpx.BaseTransport` hands back response bodies that report whether they are still open, which
+  makes "leaves no open connection" a genuine count rather than an inspection of somebody else's
+  pool. Seven exit paths are covered — drained, cancelled, abandoned, explicitly closed, failed
+  mid-flight, truncated, refused before streaming — plus a `KeyboardInterrupt` landing inside
+  error classification, and a hundred sequential streams of each kind leaving nothing open.
+- `tests/performance/test_overhead.py`: spec §15's budgets (≤ 5 ms per non-streaming request,
+  ≤ 1 ms per streamed chunk, ≤ 10 ms for a cached twenty-model listing), measured against a
+  transport that does no I/O so that what the clock sees is this package's own work. Each budget
+  is asserted twice — once bare, once with an `on_event` callback attached — because an
+  observability hook that quietly costs a millisecond a chunk is a hook nobody can afford to turn
+  on.
+- `docs/quickstart.md`: ten sections from `pip install` to the error table, all of it runnable
+  without a GPU, a model or a server until the section that says otherwise.
+- `docs/providers.md` and `scripts/generate_provider_matrix.py`: the capability matrix across all
+  three adapters, **generated from each adapter's own `capabilities()`** as the development plan's
+  Phase 4 acceptance criterion 2 requires — a hand-written matrix is a claim about an adapter, a
+  generated one is the adapter's own statement, and the two diverge silently. Late rather than
+  never: this was Phase 4's, and the omission was found while reconciling the repository's copy of
+  the development plan against the suite's master copy, which had been softened in the local copy.
+  `tests/unit/test_provider_matrix.py` fails when the committed file and the adapters disagree, so
+  a stale matrix is caught by the ordinary test run rather than by review.
+- `.github/workflows/nightly.yml`: the `performance` suite on a schedule, and the `live` suite
+  present-but-disabled pending a self-hosted runner with an Ollama on it. Testing standards §10
+  puts both in a nightly job; a marked test that runs nowhere is an untested behaviour with a
+  green tick beside it.
+
+### Changed
+- Cancellation is now checked **before** a connection is opened. A token already set when
+  `stream()` is called yields exactly one terminal `StreamFailed(GenerationCancelled)` and opens
+  no socket at all — previously the adapter connected, read one chunk and cancelled on it. The
+  event is delivered rather than raised, so a caller keeps one cancellation path instead of two,
+  and it is ordered *after* the capability checks: a request naming something the provider never
+  declared is malformed whichever way the token points, and reporting it as a cancellation would
+  hide the caller's own bug. Both real adapters and the fake behave identically, and the
+  conformance suite now asserts it for all of them.
+- Streaming in both real adapters is split into a `_drain` generator and an observing `_walk`
+  wrapper. `_drain` has six terminal exits, and an emitter called from each of them is one that
+  will eventually be forgotten at a seventh; the wrapper sees them all, so "every stream reports
+  how it ended" is structural. The wrapper closes the inner generator explicitly in `finally`,
+  because without that the `response.close()` it guards would run only when the garbage collector
+  reached it — prompt in CPython, unspecified elsewhere.
+- `OllamaProvider.load()`, `unload()` and `list_resident()` now apply the same capability gate the
+  OpenAI-compatible adapter applies, rather than assuming their own declaration. Ollama declares
+  both flags, so no behaviour changes; what changes is that the refusal path is reached from one
+  place in the codebase instead of two, and cannot drift between adapters.
+- `OllamaProvider.load()` and `unload()` match residency through `find_resident()` rather than a
+  private name comparison, so a digest-confident identity — which is what LoadCoach holds — is
+  recognised as resident against Ollama's name-only `/api/ps` report.
+- `ModelDescriptor.observed_at` on a cache hit is the instant the provider answered, not the
+  instant the descriptor was assembled; and a descriptor built from a fresh `/api/show` and an
+  older `/api/tags` entry takes the **older** of the two, because a snapshot is only as current as
+  its stalest half — which matters most for the digest, the one field on it that can change under
+  a caller without warning.
+- `FakeProvider` emits the same event stream a real adapter does, deliberately: a downstream
+  repository testing its observability against this double is testing against the shape it will
+  see in production, or against nothing at all.
+- README: a new section covering all four Phase 5 features, and a development section listing the
+  full gate rather than only `pytest`.
+
+### Fixed
+- The fake's capability refusals were a private near-copy of the OpenAI-compatible adapter's, which
+  meant three implementations of one message and three chances for it to drift. All three now
+  delegate to `modelrack.provider.require_capability()`.
+- **`health()` could raise, in both real adapters.** The `Provider` protocol is explicit that it
+  returns `UNAVAILABLE` rather than raising, because "is it up?" is a question whose negative
+  answer is not exceptional and an application's health endpoint asks it precisely when it expects
+  the answer might be no. Both adapters caught only the transport-shaped errors: `OllamaProvider`
+  escaped a typed `ProviderUnavailable` when `/api/version` answered and `/api/tags` then did not
+  — a server shutting down between the two calls, which is the moment a health probe is most
+  likely to run — and `OpenAICompatibleProvider` escaped a `ProviderRejected` on a 401, i.e. on
+  every wrong or expired `api_key`. One bad credential turned into a 500 for the caller's entire
+  health document. Present since Phases 3 and 4 respectively; found while reviewing this phase's
+  work, and now covered by a conformance test that calls `health()` on every adapter and asserts
+  only that it returned.
+- Relatedly, a provider that **answers and refuses** is now reported as
+  `ProviderStatus.DEGRADED` — "reachable, but something is wrong" — rather than as `UNAVAILABLE`.
+  A 401 from a running server is a different operational state from nothing listening, and
+  conflating them sends an operator to check the wrong thing. `DEGRADED` was in the health
+  vocabulary from Phase 1 and no adapter had ever produced it, which was the smell. The detail
+  names the error *code* and never the server's own message: a health document is rendered into a
+  UI, which makes it one more channel a credential or a prompt echo could otherwise escape
+  through (spec §14), and a test asserts both stay out of it.
+- **Streaming held about 993 KB of pure overhead on a long answer, against spec §15's 1 MiB
+  budget for an entire active stream.** Both real adapters assembled the response into a
+  `list[str]` of per-chunk fragments and joined it at the end. A CPython `str` costs roughly 49
+  bytes of object header, so a 20 000-chunk generation — a long but ordinary answer — retained
+  20 000 live objects carrying 8 bytes of text each: about six times the size of the answer, in
+  headers alone, held for the whole stream. Both now accumulate into an `io.StringIO`, which
+  brings the same stream from ~993 KB of overhead to ~20 KB, flat. Present since Phases 3 and 4;
+  it passed every existing test because nothing measured memory, and it is exactly the kind of
+  defect the development plan put a performance suite in this phase to find.
+- `tests/performance/test_overhead.py` asserts that budget in the form that has teeth. Two things
+  had to be right for the test to mean anything, and both were wrong in the first draft: the body
+  must arrive in realistic per-read chunks, because a transport that hands `httpx` a whole body at
+  once makes *its* `LineDecoder` return every line as one list — nearly two megabytes of somebody
+  else's memory, in a state no socket produces; and the measurement must be the **live** set, not
+  `tracemalloc`'s peak, because peak counts the transient payload-delta-index churn of every
+  iteration and therefore grows with length on any implementation, including one that retains
+  nothing. Measured correctly, the budget is asserted twice — as an absolute, and as *flatness*
+  between a 50-chunk and a 20 000-chunk stream. The old accumulator slipped under the absolute
+  figure by 45 KB and fails the flatness assertion by 73×, which is why both are there.
+- `docs/packages/modelrack/development-plan.md` in this repository had drifted from the suite's
+  master copy — Phase 4's `docs/providers.md` deliverable and its acceptance criterion had been
+  softened, and Phase 5's file list had lost the same file. The mirror is a downstream copy and is
+  now re-synced with the master.
+
+### Notes
+- Coverage is 100 % of statements and branches, against a floor of 95 %.
+- No Ollama, no GPU and no network are needed for the default suite; the socket guard in
+  `tests/conftest.py` fails any test outside `tests/live/` that opens one.
+
 ## [0.4.0] — 2026-08-23
 
 Phase 4 of the [development plan](docs/packages/modelrack/development-plan.md):

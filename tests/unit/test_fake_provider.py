@@ -82,7 +82,7 @@ from modelrack.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from modelrack import StreamEvent
 
@@ -1270,7 +1270,7 @@ class TestHealthAndAvailability:
     def test_every_other_call_raises_provider_unavailable(self, call: str) -> None:
         provider = _provider(FakeScript(health_status=ProviderStatus.UNAVAILABLE))
         identity = ModelIdentity(ProviderKind.FAKE, _KNOWN_MODEL)
-        calls = {
+        calls: dict[str, Callable[[], object]] = {
             "list_models": provider.list_models,
             "resolve": lambda: provider.resolve(_KNOWN_MODEL),
             "inspect_model": lambda: provider.inspect_model(identity),

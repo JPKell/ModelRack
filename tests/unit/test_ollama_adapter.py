@@ -182,6 +182,60 @@ class TestHealthAndCapabilities:
         with pytest.raises(ValidationError):
             OllamaProvider(base_url=bad_url)
 
+    @respx.mock
+    def test_health_does_not_raise_when_only_the_second_probe_fails(
+        self, load_ollama_fixture: Callable[[str], Any]
+    ) -> None:
+        """`/api/version` answers and `/api/tags` does not — a server shutting down between the
+        two calls, which is exactly the moment a health probe is most likely to run. The typed
+        error `_get_json` raises for the second call must not escape.
+        """
+        respx.get(f"{_BASE_URL}/api/version").mock(
+            return_value=httpx.Response(200, json=load_ollama_fixture("version.json"))
+        )
+        respx.get(f"{_BASE_URL}/api/tags").mock(side_effect=httpx.ConnectError("refused"))
+
+        health = _provider().health()
+
+        assert health.status is ProviderStatus.UNAVAILABLE
+        assert health.detail == "unreachable"
+
+    @respx.mock
+    def test_health_reports_degraded_when_the_server_answers_and_refuses(
+        self, load_ollama_fixture: Callable[[str], Any]
+    ) -> None:
+        """An authenticating proxy in front of Ollama returning 401 is a running server that
+        will not serve *this* caller — a different operational state from nothing listening, and
+        one an operator would otherwise go and check the wrong thing for.
+        """
+        respx.get(f"{_BASE_URL}/api/version").mock(
+            return_value=httpx.Response(200, json=load_ollama_fixture("version.json"))
+        )
+        respx.get(f"{_BASE_URL}/api/tags").mock(
+            return_value=httpx.Response(401, json={"error": "unauthorized"})
+        )
+
+        health = _provider().health()
+
+        assert health.status is ProviderStatus.DEGRADED
+        assert "PROVIDER_REJECTED" in health.detail
+
+    @respx.mock
+    def test_a_degraded_health_detail_does_not_repeat_the_servers_message(self) -> None:
+        """A health document is rendered into a UI; it must not become a fourth channel for a
+        credential or a prompt echo to escape through (spec §14).
+        """
+        respx.get(f"{_BASE_URL}/api/version").mock(
+            return_value=httpx.Response(200, json={"version": "0.32.13"})
+        )
+        respx.get(f"{_BASE_URL}/api/tags").mock(
+            return_value=httpx.Response(403, json={"error": "token sk-leaked-value rejected"})
+        )
+
+        health = _provider().health()
+
+        assert "sk-leaked-value" not in health.detail
+
 
 class TestDiscovery:
     """``list_models``, ``inspect_model`` and ``resolve`` — 0, 1 and many models."""

@@ -24,9 +24,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, NoReturn, Protocol, runtime_checkable
 
 from baseaicore import UNSUPPORTED, Measurement, ValidationError
+
+from modelrack.errors import CapabilityUnsupported
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -44,6 +46,8 @@ __all__ = [
     "ProviderHealth",
     "ProviderStatus",
     "ResidentModel",
+    "refuse_capability",
+    "require_capability",
 ]
 
 
@@ -208,6 +212,53 @@ class ResidentModel:
     expires_at: datetime | None = None
 
 
+def refuse_capability(capability: str, *, action: str) -> NoReturn:
+    """Raise :class:`~modelrack.errors.CapabilityUnsupported`, in the one wording every adapter
+    refuses with.
+
+    The single spelling of ADR-0007 rule 2's refusal. Written once rather than per adapter so that
+    the message, the error type and — most of all — ``details["capability"]`` are identical from
+    every provider: the conformance suite asserts on that key, and a caller branching on a refusal
+    should not have to know which adapter produced it.
+
+    Typed :data:`~typing.NoReturn` so an adapter whose answer is *always* a refusal — an
+    OpenAI-compatible server has no residency endpoint under any configuration — can call this as
+    the whole body of a method that declares a return type, without an unreachable ``raise`` after
+    it to convince a type checker.
+
+    Args:
+        capability: The flag's field name on :class:`ProviderCapabilities`, e.g. ``"streaming"``.
+        action: What the caller was trying to do, in the infinitive — completing the sentence
+            "this provider ... cannot <action>".
+
+    Raises:
+        CapabilityUnsupported: Always, naming ``capability`` in ``details``.
+    """
+    raise CapabilityUnsupported(
+        f"This provider does not declare {capability!r} and cannot {action}. Check "
+        "capabilities() and branch, rather than assuming.",
+        details={"capability": capability},
+    )
+
+
+def require_capability(capabilities: ProviderCapabilities, capability: str, *, action: str) -> None:
+    """Raise unless ``capability`` is declared.
+
+    Args:
+        capabilities: What the adapter declared. Read by attribute name, so a flag that does not
+            exist is an :class:`AttributeError` at the call site rather than a silent ``False``
+            that would refuse a capability the provider actually has.
+        capability: The flag's field name on :class:`ProviderCapabilities`, e.g. ``"streaming"``.
+        action: What the caller was trying to do, in the infinitive.
+
+    Raises:
+        CapabilityUnsupported: If the flag is not declared, via :func:`refuse_capability`.
+    """
+    if getattr(capabilities, capability):
+        return
+    refuse_capability(capability, action=action)
+
+
 @runtime_checkable
 class Provider(Protocol):
     """The one interface every model runtime is reached through.
@@ -250,8 +301,15 @@ class Provider(Protocol):
         """
         ...
 
-    def list_models(self) -> Sequence[ModelDescriptor]:
+    def list_models(self, *, refresh: bool = False) -> Sequence[ModelDescriptor]:
         """List the models the provider is serving.
+
+        Args:
+            refresh: Bypass any metadata this provider has cached and re-read from the source.
+                The explicit escape hatch a TTL alone cannot provide: a tag can be repointed at
+                any moment, so a caller who *knows* a model was re-pulled says so rather than
+                waiting out an expiry (see :mod:`modelrack.cache`). An adapter that caches nothing
+                accepts the argument and ignores it, so a caller need not ask which kind it holds.
 
         Returns:
             One descriptor per model, each carrying the identity and whatever metadata the
@@ -259,11 +317,16 @@ class Provider(Protocol):
         """
         ...
 
-    def inspect_model(self, identity: ModelIdentity) -> ModelDescriptor:
+    def inspect_model(self, identity: ModelIdentity, *, refresh: bool = False) -> ModelDescriptor:
         """Fetch full metadata for one model.
 
         Args:
             identity: The model to inspect.
+            refresh: Bypass any metadata this provider has cached and re-read from the source.
+                The explicit escape hatch a TTL alone cannot provide: a tag can be repointed at
+                any moment, so a caller who *knows* a model was re-pulled says so rather than
+                waiting out an expiry (see :mod:`modelrack.cache`). An adapter that caches nothing
+                accepts the argument and ignores it, so a caller need not ask which kind it holds.
 
         Returns:
             The descriptor, with the provider's untouched response preserved in
@@ -274,7 +337,7 @@ class Provider(Protocol):
         """
         ...
 
-    def resolve(self, reference: str) -> ModelIdentity:
+    def resolve(self, reference: str, *, refresh: bool = False) -> ModelIdentity:
         """Resolve a user-supplied model reference to a concrete identity.
 
         Handles the shorthand people actually type — a bare name, an alias, a unique prefix — and
@@ -286,6 +349,11 @@ class Provider(Protocol):
 
         Args:
             reference: What the user typed.
+            refresh: Bypass any metadata this provider has cached and re-read from the source.
+                The explicit escape hatch a TTL alone cannot provide: a tag can be repointed at
+                any moment, so a caller who *knows* a model was re-pulled says so rather than
+                waiting out an expiry (see :mod:`modelrack.cache`). An adapter that caches nothing
+                accepts the argument and ignores it, so a caller need not ask which kind it holds.
 
         Returns:
             The resolved identity, with its digest where the provider exposes one — normalized
@@ -333,6 +401,14 @@ class Provider(Protocol):
         Cancellation takes effect within one chunk boundary and leaves no connection open
         ([spec §11.6](../../docs/packages/modelrack/spec.md)). Abandoning the iterator without
         draining it must also close cleanly; implementations own that in their ``finally``.
+
+        A token **already cancelled when this is called** yields one
+        :class:`~modelrack.streaming.StreamFailed` carrying
+        :class:`~modelrack.errors.GenerationCancelled` and opens no connection at all. Delivered
+        rather than raised, so a caller has one cancellation path instead of two — but ordered
+        *after* the capability checks, because a request naming something the provider never
+        declared is malformed whichever way the token points, and reporting it as a cancellation
+        would hide the caller's own bug.
 
         Args:
             request: What to generate, and how. Its ``cancel`` token is honoured here.

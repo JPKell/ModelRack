@@ -51,6 +51,7 @@ import json
 import logging
 import ssl
 from collections.abc import Mapping
+from io import StringIO
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -64,14 +65,24 @@ from baseaicore import (
     utc_now,
 )
 
+from modelrack.cache import (
+    DEFAULT_METADATA_TTL_SECONDS,
+    CacheStats,
+    MetadataCache,
+    MetadataSnapshot,
+)
 from modelrack.errors import (
     CapabilityUnsupported,
     ContextLimitExceeded,
     GenerationCancelled,
     ModelNotFound,
+    ProviderError,
     ProviderProtocolError,
     ProviderRejected,
+    ProviderTimeout,
+    ProviderUnavailable,
 )
+from modelrack.events import EventEmitter
 from modelrack.provider import (
     LoadResult,
     ProviderCapabilities,
@@ -105,6 +116,11 @@ from modelrack.providers._ollama_wire import (
     read_usage,
     request_tool_definitions,
 )
+from modelrack.residency import (
+    find_resident,
+    require_force_unload,
+    require_residency_query,
+)
 from modelrack.streaming import (
     StreamCompleted,
     StreamFailed,
@@ -115,11 +131,12 @@ from modelrack.streaming import (
 from modelrack.types import GenerationResult, ResponseFormatKind, Timing
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Generator, Iterator, Sequence
     from datetime import datetime
 
     from baseaicore import Measurement, ModelDescriptor, RuntimeProfile
 
+    from modelrack.events import EventCallback
     from modelrack.streaming import StreamEvent
     from modelrack.types import GenerationRequest, ToolCall
 
@@ -191,13 +208,22 @@ class OllamaProvider:
         max_response_bytes: The total-body cap for a non-streamed response (spec §14, default
             64 MiB).
         max_chunk_bytes: The per-line cap for a streamed response (spec §14, default 8 MiB).
+        metadata_ttl_seconds: How long a ``/api/tags`` or ``/api/show`` body may be reused
+            (spec §10, default 300 s). ``0`` disables the cache. Residency is never cached —
+            ``/api/ps`` is live state, and a stale answer would tell a scheduler a model is
+            loaded that was evicted a minute ago.
+        on_event: An optional observer called as requests start, stream and finish (spec §17).
+            Receives no prompt, no generated text and no credential — see :mod:`modelrack.events`.
+            A callback that raises is logged at DEBUG and does not disturb the generation.
         clock: Where a :class:`~baseaicore.ModelDescriptor`'s ``observed_at`` comes from — the
             one reading of the real clock this adapter takes, injected so a test can freeze it
-            (coding standards §5).
+            (coding standards §5). Read when a payload is *fetched*, and stored with it, so a
+            cache hit reports when the provider actually answered rather than when the descriptor
+            happened to be assembled.
 
     Raises:
         ValidationError: If ``base_url`` has no host or uses a scheme other than ``http``/
-            ``https``.
+            ``https``, or if ``metadata_ttl_seconds`` is negative.
     """
 
     kind: ProviderKind = ProviderKind.OLLAMA
@@ -212,6 +238,8 @@ class OllamaProvider:
         verify: ssl.SSLContext | str | bool = True,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_chunk_bytes: int = DEFAULT_MAX_CHUNK_BYTES,
+        metadata_ttl_seconds: float = DEFAULT_METADATA_TTL_SECONDS,
+        on_event: EventCallback | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """Validate the base URL and construct or adopt the pooled HTTP client."""
@@ -221,6 +249,10 @@ class OllamaProvider:
         self._max_response_bytes = max_response_bytes
         self._max_chunk_bytes = max_chunk_bytes
         self._clock = clock
+        self._cache: MetadataCache[MetadataSnapshot] = MetadataCache(
+            ttl_seconds=metadata_ttl_seconds
+        )
+        self._events = EventEmitter(on_event, provider_kind=self.kind)
         self._client = client or build_client(
             base_url=validated_url,
             timeout=timeout,
@@ -235,10 +267,19 @@ class OllamaProvider:
 
         Returns:
             :attr:`~modelrack.provider.ProviderStatus.OK` with the server's version and model
-            count on success; :attr:`~modelrack.provider.ProviderStatus.UNAVAILABLE` — never a
-            raised exception — when the provider cannot be reached at all, because "is it up?"
-            is a question whose negative answer is not exceptional (see
+            count on success; :attr:`~modelrack.provider.ProviderStatus.UNAVAILABLE` when the
+            provider cannot be reached at all; :attr:`~modelrack.provider.ProviderStatus.DEGRADED`
+            when it answered and refused — a 401 from an authenticating proxy in front of Ollama
+            is the ordinary case, and it is genuinely a different operational state from nothing
+            listening. **Never a raised exception**, whichever of the three it is: "is it up?" is
+            a question whose negative answer is not exceptional, and an application's health
+            endpoint asks it precisely when it expects the answer might be no (see
             :meth:`~modelrack.provider.Provider.health`'s own contract).
+
+        Note:
+            Never served from the metadata cache, and never fills it. A health probe that could
+            answer "OK, 11 models" from a five-minute-old body would report a provider healthy
+            after it had stopped — which is the one thing this method exists to notice.
         """
         start_ns = monotonic_ns()
         try:
@@ -247,13 +288,25 @@ class OllamaProvider:
             version_payload = read_capped_json(
                 version_response, max_bytes=self._max_response_bytes, base_url=self._base_url
             )
-            models = self._list_tags()
-        except (httpx.HTTPError, ProviderProtocolError):
+            models = self._model_entries(self._get_json("/api/tags"))
+        except (httpx.HTTPError, ProviderUnavailable, ProviderTimeout, ProviderProtocolError):
             return ProviderHealth(
                 status=ProviderStatus.UNAVAILABLE,
                 base_url=self._base_url,
                 is_remote=self._is_remote,
                 detail="unreachable",
+                latency_ms=elapsed_ms(start_ns),
+            )
+        except ProviderError as exc:
+            # It answered, and refused. Its own message is deliberately not repeated here: a
+            # health document is rendered into a UI and this method must not become the fourth
+            # channel a credential or a prompt echo escapes through (spec §14). The code is
+            # actionable; the body belongs in the caller's artifact storage.
+            return ProviderHealth(
+                status=ProviderStatus.DEGRADED,
+                base_url=self._base_url,
+                is_remote=self._is_remote,
+                detail=f"reachable, but refused the probe ({exc.code})",
                 latency_ms=elapsed_ms(start_ns),
             )
         version = version_payload.get("version") if isinstance(version_payload, dict) else None
@@ -277,13 +330,55 @@ class OllamaProvider:
         """
         return _CAPABILITIES
 
-    def list_models(self) -> Sequence[ModelDescriptor]:
+    # ------------------------------------------------------------------------- metadata cache
+
+    @property
+    def metadata_cache_ttl_seconds(self) -> float:
+        """How long a cached ``/api/tags`` or ``/api/show`` body is reused, in seconds.
+
+        Returns:
+            The lifetime this adapter was constructed with; ``0.0`` when caching is disabled.
+        """
+        return self._cache.ttl_seconds
+
+    def metadata_cache_stats(self) -> CacheStats:
+        """Report what the metadata cache has done since construction or the last clear.
+
+        Spec §10 requires the cache to be inspectable; this is the inspection. Counting only
+        metadata, because metadata is the only thing cached — no generation result ever enters
+        it, and a test asserts that.
+
+        Returns:
+            A consistent snapshot of the hit, miss, expiry and store counters plus the current
+            entry count.
+        """
+        return self._cache.stats()
+
+    def clear_metadata_cache(self) -> None:
+        """Drop every cached provider body and reset the cache counters.
+
+        Spec §10's required escape hatch, for a caller that has re-pulled a model or simply does
+        not trust what is held. The next read of anything is guaranteed cold. Prefer
+        ``refresh=True`` on one call when only one model changed — clearing the whole cache to
+        re-read one of twenty models throws away nineteen good round trips.
+        """
+        self._cache.clear()
+
+    def list_models(self, *, refresh: bool = False) -> Sequence[ModelDescriptor]:
         """List the models Ollama is serving, each enriched with full architecture metadata.
 
         Calls ``/api/show`` once per model after ``/api/tags`` — the reason spec §15 budgets
         cold ``list_models`` at seconds rather than milliseconds ("dominated by per-model
         ``show`` calls"): ``/api/tags`` alone carries no layer count, no head counts and no
-        embedding width, and those are exactly what FreeWeight's KV-cache benchmark needs.
+        embedding width, and those are exactly what FreeWeight's KV-cache benchmark needs. Both
+        bodies are cached for :attr:`metadata_cache_ttl_seconds`, which is what makes the warm
+        call spec §15's ≤ 10 ms rather than another N+1 round trips.
+
+        Args:
+            refresh: Re-read from Ollama, ignoring anything cached. The escape hatch a TTL
+                alone cannot provide: a model that has just been re-pulled has a new digest under
+                the same tag, and a caller who knows that says so rather than waiting out an
+                expiry (spec §10, and the development plan's Phase 5 failure mode).
 
         Returns:
             One descriptor per model. Empty when nothing is pulled, which is a real state.
@@ -292,10 +387,13 @@ class OllamaProvider:
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        entries = self._list_tags()
-        return tuple(self._describe_entry(entry) for entry in entries)
+        tags = self._tags_snapshot(refresh=refresh)
+        return tuple(
+            self._describe_entry(entry, tags=tags, refresh=refresh)
+            for entry in self._model_entries(tags.payload)
+        )
 
-    def inspect_model(self, identity: ModelIdentity) -> ModelDescriptor:
+    def inspect_model(self, identity: ModelIdentity, *, refresh: bool = False) -> ModelDescriptor:
         """Fetch full metadata for one model.
 
         Two calls, unavoidably: ``/api/tags`` for the current digest (so a retag is caught rather
@@ -305,6 +403,10 @@ class OllamaProvider:
         Args:
             identity: The model to inspect, matched on
                 :attr:`~baseaicore.ModelIdentity.provider_model_name`.
+            refresh: Re-read from Ollama, ignoring anything cached. The escape hatch a TTL
+                alone cannot provide: a model that has just been re-pulled has a new digest under
+                the same tag, and a caller who knows that says so rather than waiting out an
+                expiry (spec §10, and the development plan's Phase 5 failure mode).
 
         Returns:
             The descriptor, with both raw payloads preserved in
@@ -315,11 +417,11 @@ class OllamaProvider:
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        entries = self._list_tags()
-        entry = self._find_entry(entries, identity.provider_model_name)
-        return self._describe_entry(entry)
+        tags = self._tags_snapshot(refresh=refresh)
+        entry = self._find_entry(self._model_entries(tags.payload), identity.provider_model_name)
+        return self._describe_entry(entry, tags=tags, refresh=refresh)
 
-    def resolve(self, reference: str) -> ModelIdentity:
+    def resolve(self, reference: str, *, refresh: bool = False) -> ModelIdentity:
         """Resolve a user-supplied model reference to a concrete identity.
 
         Tries, in order: an exact name; Ollama's own ``:latest``-suffix convention for a bare name
@@ -329,6 +431,10 @@ class OllamaProvider:
 
         Args:
             reference: What the user typed.
+            refresh: Re-read from Ollama, ignoring anything cached. The escape hatch a TTL
+                alone cannot provide: a model that has just been re-pulled has a new digest under
+                the same tag, and a caller who knows that says so rather than waiting out an
+                expiry (spec §10, and the development plan's Phase 5 failure mode).
 
         Returns:
             The resolved identity, digest-confident when Ollama reports one.
@@ -338,7 +444,7 @@ class OllamaProvider:
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        entries = self._list_tags()
+        entries = self._model_entries(self._tags_snapshot(refresh=refresh).payload)
         entry = self._resolve_entry(entries, reference)
         entry_name = str(entry.get("name") or entry.get("model") or "")
         identity = identity_for(entry_name, entry.get("digest"))[0]
@@ -374,11 +480,14 @@ class OllamaProvider:
 
         Raises:
             ModelNotFound: If Ollama does not have it.
+            CapabilityUnsupported: Never in practice — Ollama declares ``force_unload`` — but the
+                gate is applied here rather than assumed, so that every adapter refuses the same
+                way and the conformance suite's refusal branch is reached from one place.
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        resident = self._list_ps()
-        if self._find_optional_entry(resident, identity.provider_model_name) is not None:
+        require_force_unload(_CAPABILITIES, action="load a model on demand")
+        if find_resident(self.list_resident(), identity) is not None:
             return LoadResult(
                 identity=identity,
                 already_resident=True,
@@ -387,12 +496,29 @@ class OllamaProvider:
             )
         body = self._load_body(identity, profile)
         start_ns = monotonic_ns()
-        payload = self._post_json(
-            "/api/generate", body, model_reference=identity.provider_model_name
-        )
+        self._events.started(operation="load", model_name=identity.provider_model_name, metadata={})
+        try:
+            payload = self._post_json(
+                "/api/generate", body, model_reference=identity.provider_model_name
+            )
+        except ProviderError as exc:
+            self._events.failed(
+                operation="load",
+                model_name=identity.provider_model_name,
+                metadata={},
+                error_code=exc.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise
         backend = read_backend_timing(payload if isinstance(payload, dict) else {})
         load_ms = self._first_supported(
             backend.backend_load_ms, backend.backend_total_ms, elapsed_ms(start_ns)
+        )
+        self._events.completed(
+            operation="load",
+            model_name=identity.provider_model_name,
+            metadata={},
+            elapsed_ms=elapsed_ms(start_ns),
         )
         return LoadResult(
             identity=identity,
@@ -413,16 +539,38 @@ class OllamaProvider:
 
         Raises:
             ModelNotFound: If Ollama does not have it.
+            CapabilityUnsupported: Never in practice — Ollama declares ``force_unload`` — but the
+                gate is applied here for the same reason it is in :meth:`load`.
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        resident = self._list_ps()
-        if self._find_optional_entry(resident, identity.provider_model_name) is None:
+        require_force_unload(_CAPABILITIES, action="evict a model on demand")
+        if find_resident(self.list_resident(), identity) is None:
             return False
-        self._post_json(
-            "/api/generate",
-            {"model": identity.provider_model_name, "keep_alive": _UNLOAD_KEEP_ALIVE},
-            model_reference=identity.provider_model_name,
+        start_ns = monotonic_ns()
+        self._events.started(
+            operation="unload", model_name=identity.provider_model_name, metadata={}
+        )
+        try:
+            self._post_json(
+                "/api/generate",
+                {"model": identity.provider_model_name, "keep_alive": _UNLOAD_KEEP_ALIVE},
+                model_reference=identity.provider_model_name,
+            )
+        except ProviderError as exc:
+            self._events.failed(
+                operation="unload",
+                model_name=identity.provider_model_name,
+                metadata={},
+                error_code=exc.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise
+        self._events.completed(
+            operation="unload",
+            model_name=identity.provider_model_name,
+            metadata={},
+            elapsed_ms=elapsed_ms(start_ns),
         )
         return True
 
@@ -437,9 +585,12 @@ class OllamaProvider:
             choosing to report one number of its own.
 
         Raises:
+            CapabilityUnsupported: Never in practice — Ollama declares ``residency_query`` — but
+                the gate is applied here for the same reason it is in :meth:`load`.
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
+        require_residency_query(_CAPABILITIES)
         entries = self._list_ps()
         built = [build_resident_model(entry) for entry in entries]
         built.sort(key=lambda item: item[0].provider_model_name)
@@ -473,6 +624,41 @@ class OllamaProvider:
         """
         path, body = self._build_request(request, stream=False)
         start_ns = monotonic_ns()
+        self._events.started(
+            operation="generate",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+        )
+        try:
+            result = self._generate_once(request, path, body, start_ns)
+        except ProviderError as exc:
+            self._events.failed(
+                operation="generate",
+                model_name=request.identity.provider_model_name,
+                metadata=request.metadata,
+                error_code=exc.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise
+        self._events.completed(
+            operation="generate",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+            elapsed_ms=result.timing.client_wall_ms,
+            output_tokens=result.usage.tokens.output_tokens,
+            finish_reason=result.finish_reason.value,
+        )
+        return result
+
+    def _generate_once(
+        self, request: GenerationRequest, path: str, body: Mapping[str, Any], start_ns: int
+    ) -> GenerationResult:
+        """Run the round trip :meth:`generate` wraps in its event pair.
+
+        Split out so the ``started``/``completed``/``failed`` triple lives in one readable block
+        rather than threading a ``try`` through the parsing below — and so every ``raise`` in
+        here is reported as a failure without each one having to remember to say so.
+        """
         payload = self._post_json(
             path,
             body,
@@ -515,7 +701,8 @@ class OllamaProvider:
 
         Args:
             request: What to generate, and how. Its ``cancel`` token is honoured within one
-                NDJSON line.
+                NDJSON line. A token already set when this is called yields one terminal
+                :class:`~modelrack.streaming.StreamFailed` and opens no connection at all.
 
         Yields:
             Deltas, then one terminal event.
@@ -529,14 +716,29 @@ class OllamaProvider:
             ProviderTimeout: If it does not answer in time.
         """
         path, body = self._build_request(request, stream=True)
+        if request.cancel is not None and request.cancel.is_cancelled:
+            return iter((self._already_cancelled(request),))
         start_ns = monotonic_ns()
+        self._events.started(
+            operation="stream",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+        )
         prepared = self._client.build_request(
             "POST", path, json=body, timeout=self._timeout_for(request)
         )
         try:
             response = self._client.send(prepared, stream=True)
         except httpx.HTTPError as exc:
-            raise translate_transport_error(exc, base_url=self._base_url) from exc
+            error = translate_transport_error(exc, base_url=self._base_url)
+            self._events.failed(
+                operation="stream",
+                model_name=request.identity.provider_model_name,
+                metadata=request.metadata,
+                error_code=error.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise error from exc
         try:
             if response.status_code >= 400:
                 self._raise_for_status(
@@ -544,14 +746,107 @@ class OllamaProvider:
                     model_reference=request.identity.provider_model_name,
                     context_size=request.runtime_profile.context_size,
                 )
+        except ProviderError as exc:
+            response.close()
+            self._events.failed(
+                operation="stream",
+                model_name=request.identity.provider_model_name,
+                metadata=request.metadata,
+                error_code=exc.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise
         except BaseException:
             response.close()
             raise
         return self._walk(request, response, start_ns)
 
+    def _already_cancelled(self, request: GenerationRequest) -> StreamFailed:
+        """Return the one terminal event a stream cancelled before it began is entitled to.
+
+        Delivered rather than raised, so a caller draining the iterator sees the same terminal
+        event it would have seen had the token been flipped mid-stream — one code path for
+        cancellation, not two — and **no connection is opened at all**: a socket opened solely to
+        be closed on the first chunk is exactly the leak this phase's hardening is about.
+        ``elapsed_ms`` on the emitted event stays ``UNSUPPORTED`` rather than ``0``: nothing was
+        timed, and a zero would claim an instantaneous provider call that never happened
+        (ADR-0016).
+        """
+        self._events.started(
+            operation="stream",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+        )
+        event = self._cancelled("")
+        self._events.failed(
+            operation="stream",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+            error_code=event.error.code,
+        )
+        return event
+
     def _walk(
         self, request: GenerationRequest, response: httpx.Response, start_ns: int
     ) -> Iterator[StreamEvent]:
+        """Observe every event :meth:`_drain` produces, then hand it on unchanged.
+
+        The observation lives here rather than at each ``yield`` inside :meth:`_drain` for one
+        reason worth stating: :meth:`_drain` has six terminal exits, and an emitter called from
+        each of them is an emitter that will eventually be forgotten at a seventh. One wrapper
+        sees them all, so "every stream reports how it ended" is structural rather than a
+        convention.
+
+        Closing the inner generator explicitly in ``finally`` is what keeps the connection
+        guarantee intact across the extra layer. Abandoning *this* generator raises
+        ``GeneratorExit`` at its ``yield``; without the explicit ``close()`` the inner generator's
+        own ``finally`` — the one holding ``response.close()`` — would run only when the garbage
+        collector got to it, which is prompt in CPython and unspecified everywhere else.
+        """
+        model_name = request.identity.provider_model_name
+        events = self._drain(request, response, start_ns)
+        try:
+            for event in events:
+                self._observe(event, request, start_ns, model_name)
+                yield event
+        finally:
+            events.close()
+
+    def _observe(
+        self, event: StreamEvent, request: GenerationRequest, start_ns: int, model_name: str
+    ) -> None:
+        """Emit the observability event matching one stream event, if anyone is listening."""
+        if not self._events.is_observed:
+            return
+        if isinstance(event, StreamCompleted):
+            self._events.completed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                elapsed_ms=event.result.timing.client_wall_ms,
+                output_tokens=event.result.usage.tokens.output_tokens,
+                finish_reason=event.result.finish_reason.value,
+            )
+        elif isinstance(event, StreamFailed):
+            self._events.failed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                error_code=event.error.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+        else:
+            self._events.chunk(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                chunk_index=event.index,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+
+    def _drain(
+        self, request: GenerationRequest, response: httpx.Response, start_ns: int
+    ) -> Generator[StreamEvent, None, None]:
         """Drain one NDJSON stream, owning ``response`` for its entire remaining lifetime.
 
         The generator this method returns is what makes the connection-closing guarantee real:
@@ -561,8 +856,8 @@ class OllamaProvider:
         early, and never touching it again all release the connection the same way.
         """
         cancel = request.cancel
-        answer_parts: list[str] = []
-        thinking_parts: list[str] = []
+        answer = StringIO()
+        thinking = StringIO()
         saw_thinking_key = False
         tool_calls: tuple[ToolCall, ...] = ()
         first_delta_ns: int | None = None
@@ -578,7 +873,7 @@ class OllamaProvider:
                 if not line.strip():
                     continue
                 if cancel is not None and cancel.is_cancelled:
-                    yield self._cancelled("".join(answer_parts))
+                    yield self._cancelled(answer.getvalue())
                     return
                 try:
                     payload = json.loads(line)
@@ -588,7 +883,7 @@ class OllamaProvider:
                             f"A streamed line from {self._base_url} was not valid JSON.",
                             details={"base_url": self._base_url, "body": truncated_text(line)},
                         ),
-                        partial_text="".join(answer_parts),
+                        partial_text=answer.getvalue(),
                     )
                     return
                 if not isinstance(payload, dict):
@@ -597,7 +892,7 @@ class OllamaProvider:
                             f"A streamed line from {self._base_url} was not a JSON object.",
                             details={"base_url": self._base_url, "body": truncated_text(line)},
                         ),
-                        partial_text="".join(answer_parts),
+                        partial_text=answer.getvalue(),
                     )
                     return
                 message = extract_error_message(payload)
@@ -608,7 +903,7 @@ class OllamaProvider:
                             status_code=response.status_code,
                             context_size=request.runtime_profile.context_size,
                         ),
-                        partial_text="".join(answer_parts),
+                        partial_text=answer.getvalue(),
                     )
                     return
 
@@ -619,12 +914,12 @@ class OllamaProvider:
                     saw_thinking_key = True
                 if thinking_piece:
                     first_delta_ns = first_delta_ns or monotonic_ns()
-                    thinking_parts.append(thinking_piece)
+                    thinking.write(thinking_piece)
                     yield ThinkingDelta(text=thinking_piece, index=delta_index)
                     delta_index += 1
                 if text_piece:
                     first_delta_ns = first_delta_ns or monotonic_ns()
-                    answer_parts.append(text_piece)
+                    answer.write(text_piece)
                     yield TokenDelta(text=text_piece, index=delta_index)
                     delta_index += 1
                 if raw_tool_calls:
@@ -657,12 +952,12 @@ class OllamaProvider:
                         f"The stream from {self._base_url} ended without a terminal chunk.",
                         details={"base_url": self._base_url},
                     ),
-                    partial_text="".join(answer_parts),
+                    partial_text=answer.getvalue(),
                 )
                 return
 
             if cancel is not None and cancel.is_cancelled:
-                yield self._cancelled("".join(answer_parts))
+                yield self._cancelled(answer.getvalue())
                 return
             if terminal_payload is None:  # pragma: no cover — the `else` above always returns first
                 raise AssertionError("stream loop exited without a terminal payload or a return")
@@ -673,8 +968,8 @@ class OllamaProvider:
             yield StreamCompleted(
                 result=self._build_result(
                     request,
-                    text="".join(answer_parts),
-                    thinking="".join(thinking_parts) if saw_thinking_key else UNSUPPORTED,
+                    text=answer.getvalue(),
+                    thinking=thinking.getvalue() if saw_thinking_key else UNSUPPORTED,
                     tool_calls=tool_calls,
                     terminal_payload=terminal_payload,
                     client_wall_ms=wall_ms,
@@ -684,7 +979,7 @@ class OllamaProvider:
         except httpx.HTTPError as exc:
             yield StreamFailed(
                 error=translate_stream_interruption(exc, base_url=self._base_url),
-                partial_text="".join(answer_parts),
+                partial_text=answer.getvalue(),
             )
         except ProviderProtocolError as exc:
             # Raised by `iter_capped_lines` itself when a line exceeds the per-chunk cap — a
@@ -692,7 +987,7 @@ class OllamaProvider:
             # rather than re-translated. Caught here rather than let it escape the generator:
             # the stream has already begun, so this is a `StreamFailed`, never a raise
             # (spec §13, and modelrack.streaming's own terminal-event rule).
-            yield StreamFailed(error=exc, partial_text="".join(answer_parts))
+            yield StreamFailed(error=exc, partial_text=answer.getvalue())
         finally:
             response.close()
 
@@ -840,7 +1135,7 @@ class OllamaProvider:
             payload, raw_text = None, str(exc.details.get("body", ""))
         message = extract_error_message(payload)
         if response.status_code == 404 and model_reference is not None:
-            entries = self._list_tags()
+            entries = self._model_entries(self._tags_snapshot(refresh=False).payload)
             raise ModelNotFound(
                 message or f"Model {model_reference!r} not found.",
                 details={"reference": model_reference, "known_model_count": len(entries)},
@@ -898,9 +1193,15 @@ class OllamaProvider:
         except httpx.HTTPError as exc:
             raise translate_transport_error(exc, base_url=self._base_url) from exc
 
-    def _list_tags(self) -> list[dict[str, Any]]:
-        """Return ``/api/tags``'s ``models`` array, or an empty list if the shape is unexpected."""
-        return self._model_entries(self._get_json("/api/tags"))
+    def _tags_snapshot(self, *, refresh: bool) -> MetadataSnapshot:
+        """Return ``/api/tags``'s body with the instant it was read, cached under one key.
+
+        One key for the whole listing rather than one per model: ``/api/tags`` is a single round
+        trip whose entries are only meaningful together — a per-model split would let a caller
+        hold half a listing from before a pull and half from after, and "which models exist" is
+        not a question with a partial answer.
+        """
+        return self._snapshot("tags", refresh=refresh, fetch=lambda: self._get_json("/api/tags"))
 
     def _list_ps(self) -> list[dict[str, Any]]:
         """Return ``/api/ps``'s ``models`` array, or an empty list if the shape is unexpected."""
@@ -914,10 +1215,35 @@ class OllamaProvider:
             return []
         return [entry for entry in models if isinstance(entry, dict)]
 
-    def _show(self, name: str) -> dict[str, Any]:
-        """Return ``/api/show``'s body for one model."""
-        payload = self._post_json("/api/show", {"model": name}, model_reference=name)
-        return payload if isinstance(payload, dict) else {}
+    def _show_snapshot(self, name: str, *, refresh: bool) -> MetadataSnapshot:
+        """Return ``/api/show``'s body for one model, with the instant it was read.
+
+        Cached per model name, because that is the granularity a caller re-reads at: one model
+        re-pulled should not cost the other nineteen their metadata.
+        """
+        return self._snapshot(
+            f"show:{name}",
+            refresh=refresh,
+            fetch=lambda: self._post_json("/api/show", {"model": name}, model_reference=name),
+        )
+
+    def _snapshot(self, key: str, *, refresh: bool, fetch: Callable[[], Any]) -> MetadataSnapshot:
+        """Return a cached provider body, or fetch and cache one, stamped with when it arrived.
+
+        The clock is read *after* the fetch returns, so ``observed_at`` names the moment the
+        provider had answered rather than the moment this process decided to ask — the difference
+        is the whole round trip, and on a cold twenty-model discovery that is seconds.
+        """
+        if not refresh:
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+        payload = fetch()
+        snapshot = MetadataSnapshot(
+            observed_at=self._clock(), payload=payload if isinstance(payload, dict) else {}
+        )
+        self._cache.put(key, snapshot)
+        return snapshot
 
     @staticmethod
     def _entry_name(entry: Mapping[str, Any]) -> str:
@@ -976,16 +1302,24 @@ class OllamaProvider:
             details={"reference": reference, "known_model_count": len(entries)},
         )
 
-    def _describe_entry(self, entry: dict[str, Any]) -> ModelDescriptor:
-        """Enrich one ``/api/tags`` entry with ``/api/show`` metadata into a full descriptor."""
+    def _describe_entry(
+        self, entry: dict[str, Any], *, tags: MetadataSnapshot, refresh: bool
+    ) -> ModelDescriptor:
+        """Enrich one ``/api/tags`` entry with ``/api/show`` metadata into a full descriptor.
+
+        ``observed_at`` is the **older** of the two payloads' instants. A descriptor assembled
+        from a fresh ``show`` and a five-minute-old ``tags`` entry is only as current as its
+        stalest half, and claiming the newer instant would overstate the freshness of the digest —
+        which is the one field on it that can change under a caller without warning.
+        """
         name = self._entry_name(entry)
-        show = self._show(name)
+        show = self._show_snapshot(name, refresh=refresh)
         return build_descriptor(
             name=name,
             digest=entry.get("digest"),
             size=as_measurement(entry.get("size")),
-            show=show,
-            observed_at=self._clock(),
+            show=dict(show.payload),
+            observed_at=min(tags.observed_at, show.observed_at),
         )
 
     @staticmethod

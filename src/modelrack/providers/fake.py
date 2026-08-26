@@ -85,19 +85,21 @@ from baseaicore import (
 )
 
 from modelrack.errors import (
-    CapabilityUnsupported,
     ContextLimitExceeded,
     GenerationCancelled,
     ModelNotFound,
+    ProviderError,
     ProviderUnavailable,
     ProviderUnavailableReason,
 )
+from modelrack.events import EventEmitter
 from modelrack.provider import (
     LoadResult,
     ProviderCapabilities,
     ProviderHealth,
     ProviderStatus,
     ResidentModel,
+    require_capability,
 )
 from modelrack.providers._fake_errors import failure_error, timeout_error
 from modelrack.providers._fake_generation import (
@@ -136,6 +138,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from baseaicore import RuntimeProfile
+
+    from modelrack.events import EventCallback
 
 __all__ = [
     "DEFAULT_MODEL",
@@ -217,6 +221,7 @@ class FakeProvider:
         sleep: Callable[[float], None] | None = None,
         clock: Callable[[], datetime] = utc_now,
         default_timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        on_event: EventCallback | None = None,
     ) -> None:
         """Validate the injected boundaries and start at the beginning of the script."""
         if isinstance(seed, bool) or not isinstance(seed, int):
@@ -247,6 +252,7 @@ class FakeProvider:
         self._lock = threading.Lock()
         self._generation_index = 0
         self._resident: set[str] = set()
+        self._events = EventEmitter(on_event, provider_kind=self.kind)
 
     # ------------------------------------------------------------------ inspection and control
 
@@ -324,8 +330,15 @@ class FakeProvider:
         """
         return self._script.capabilities
 
-    def list_models(self) -> Sequence[ModelDescriptor]:
+    def list_models(self, *, refresh: bool = False) -> Sequence[ModelDescriptor]:
         """List the catalogue.
+
+        Args:
+            refresh: Accepted and ignored. The fake's catalogue is an in-memory object with
+                nothing between it and the caller, so there is no cache to bypass — the argument
+                exists so that code written against the :class:`~modelrack.provider.Provider`
+                protocol runs unchanged against the fake and against an adapter that does cache
+                (:mod:`modelrack.cache`).
 
         Returns:
             One descriptor per model, in catalogue order, each observed at the injected clock's
@@ -338,7 +351,7 @@ class FakeProvider:
         self._require_available()
         return tuple(self._describe(model) for model in self._script.models)
 
-    def inspect_model(self, identity: ModelIdentity) -> ModelDescriptor:
+    def inspect_model(self, identity: ModelIdentity, *, refresh: bool = False) -> ModelDescriptor:
         """Fetch full metadata for one model.
 
         The descriptor carries the identity the catalogue holds **now**, which may differ from the
@@ -349,6 +362,11 @@ class FakeProvider:
         Args:
             identity: The model to inspect. Matched on the provider's model name; an alias works
                 too, because that is what a caller who resolved one will be holding.
+            refresh: Accepted and ignored. The fake's catalogue is an in-memory object with
+                nothing between it and the caller, so there is no cache to bypass — the argument
+                exists so that code written against the :class:`~modelrack.provider.Provider`
+                protocol runs unchanged against the fake and against an adapter that does cache
+                (:mod:`modelrack.cache`).
 
         Returns:
             The descriptor, with the fake's synthesized provider payload preserved in ``raw``.
@@ -373,7 +391,7 @@ class FakeProvider:
             )
         return descriptor
 
-    def resolve(self, reference: str) -> ModelIdentity:
+    def resolve(self, reference: str, *, refresh: bool = False) -> ModelIdentity:
         """Resolve what a user typed to a concrete identity.
 
         Matches an exact name first, then an alias, then a unique prefix of either — the shorthand
@@ -385,6 +403,11 @@ class FakeProvider:
 
         Args:
             reference: What the user typed.
+            refresh: Accepted and ignored. The fake's catalogue is an in-memory object with
+                nothing between it and the caller, so there is no cache to bypass — the argument
+                exists so that code written against the :class:`~modelrack.provider.Provider`
+                protocol runs unchanged against the fake and against an adapter that does cache
+                (:mod:`modelrack.cache`).
 
         Returns:
             The resolved identity.
@@ -431,6 +454,36 @@ class FakeProvider:
             ProviderUnavailable: If this provider is scripted unavailable.
             ProviderError: Whatever a scripted failure asks for.
         """
+        model_name = request.identity.provider_model_name
+        self._events.started(operation="generate", model_name=model_name, metadata=request.metadata)
+        try:
+            result = self._generate_once(request)
+        except ProviderError as exc:
+            self._events.failed(
+                operation="generate",
+                model_name=model_name,
+                metadata=request.metadata,
+                error_code=exc.code,
+            )
+            raise
+        self._events.completed(
+            operation="generate",
+            model_name=model_name,
+            metadata=request.metadata,
+            elapsed_ms=result.timing.client_wall_ms,
+            output_tokens=result.usage.tokens.output_tokens,
+            finish_reason=result.finish_reason.value,
+        )
+        return result
+
+    def _generate_once(self, request: GenerationRequest) -> GenerationResult:
+        """Run the scripted generation :meth:`generate` wraps in its event pair.
+
+        Emitting from a wrapper rather than from each ``raise`` is what makes the fake's event
+        stream the *same shape* as a real adapter's — which matters more here than anywhere else,
+        because a downstream repository that tests its observability against this double is
+        testing against the shape it will see in production or against nothing at all.
+        """
         plan, limit_ms = self._prepare(request, streaming=False)
         if plan.failure is not None:
             step_index = plan.failure_step if plan.failure_step is not None else 0
@@ -464,7 +517,9 @@ class FakeProvider:
 
         Args:
             request: What to generate, and how. Its ``cancel`` token is honoured here, taking
-                effect within one delta.
+                effect within one delta. A token already set when this is called yields one
+                terminal :class:`~modelrack.streaming.StreamFailed` without consuming a step of
+                the script — the fake's equivalent of a real adapter opening no connection.
 
         Yields:
             Deltas, then one terminal event.
@@ -477,12 +532,72 @@ class FakeProvider:
             ProviderUnavailable: If this provider is scripted unavailable.
             ProviderError: Whatever a failure scripted with ``after_chunks=None`` asks for.
         """
+        model_name = request.identity.provider_model_name
+        self._require_declared(request, streaming=True)
+        if request.cancel is not None and request.cancel.is_cancelled:
+            self._events.started(
+                operation="stream", model_name=model_name, metadata=request.metadata
+            )
+            event = self._cancelled("")
+            self._events.failed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                error_code=event.error.code,
+            )
+            return iter((event,))
         plan, limit_ms = self._prepare(request, streaming=True)
+        self._events.started(operation="stream", model_name=model_name, metadata=request.metadata)
         if plan.failure is not None and plan.failure_step is None:
-            raise failure_error(
+            error = failure_error(
                 plan, request, elapsed_ms=0.0, chunks_delivered=0, limit_ms=limit_ms
             )
-        return self._walk(plan, request, limit_ms)
+            self._events.failed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                error_code=error.code,
+            )
+            raise error
+        return self._observed(self._walk(plan, request, limit_ms), request, model_name)
+
+    def _observed(
+        self, events: Iterator[StreamEvent], request: GenerationRequest, model_name: str
+    ) -> Iterator[StreamEvent]:
+        """Emit one observability event per stream event, then hand each on unchanged.
+
+        The same wrapper shape both real adapters use, for the same reason: :meth:`_walk` has six
+        terminal exits, and an emitter called from each of them is one that will be forgotten at a
+        seventh.
+        """
+        for event in events:
+            if not self._events.is_observed:
+                yield event
+                continue
+            if isinstance(event, StreamCompleted):
+                self._events.completed(
+                    operation="stream",
+                    model_name=model_name,
+                    metadata=request.metadata,
+                    elapsed_ms=event.result.timing.client_wall_ms,
+                    output_tokens=event.result.usage.tokens.output_tokens,
+                    finish_reason=event.result.finish_reason.value,
+                )
+            elif isinstance(event, StreamFailed):
+                self._events.failed(
+                    operation="stream",
+                    model_name=model_name,
+                    metadata=request.metadata,
+                    error_code=event.error.code,
+                )
+            else:
+                self._events.chunk(
+                    operation="stream",
+                    model_name=model_name,
+                    metadata=request.metadata,
+                    chunk_index=event.index,
+                )
+            yield event
 
     def load(self, identity: ModelIdentity, profile: RuntimeProfile) -> LoadResult:
         """Mark a model resident, reporting whether it already was.
@@ -590,20 +705,17 @@ class FakeProvider:
         )
 
     def _require_capability(self, capability: str, action: str) -> None:
-        """Raise unless the named capability flag is declared.
+        """Raise unless the named capability flag is declared by this provider's script.
 
-        Refused here rather than attempted and quietly degraded: an adapter that accepted a tool
+        Refused rather than attempted and quietly degraded: an adapter that accepted a tool
         definition and dropped it would produce a result whose ``finish_reason`` never mentions
         tools, and the caller would read that as the model choosing not to call one
-        (ADR-0007 rule 2).
+        (ADR-0007 rule 2). Delegates to
+        :func:`~modelrack.provider.require_capability` so the fake's refusal is byte-identical to
+        a real adapter's — a downstream test that matches on the message or on
+        ``details["capability"]`` must not pass against the double and fail against Ollama.
         """
-        if getattr(self._script.capabilities, capability):
-            return
-        raise CapabilityUnsupported(
-            f"This provider does not declare {capability!r} and cannot {action}. Check "
-            "capabilities() and branch, rather than assuming.",
-            details={"capability": capability},
-        )
+        require_capability(self._script.capabilities, capability, action=action)
 
     def _require_model(self, name: str) -> FakeModel:
         """Return the catalogue entry reachable under an exact name or alias, or raise."""
@@ -777,6 +889,26 @@ class FakeProvider:
         before it could have reached a provider does not eat a step of the script.
         """
         self._require_available()
+        self._require_declared(request, streaming=streaming)
+        model = self._require_model(request.identity.provider_model_name)
+        prompt_text = _render_prompt(request)
+        prompt_tokens = _simulated_token_count(prompt_text)
+        self._check_context(request, prompt_tokens)
+        generation, generation_index = self._next_generation()
+        plan = self._build_plan(
+            request, model, generation, generation_index, prompt_text, prompt_tokens
+        )
+        return plan, self._effective_limit_ms(request)
+
+    def _require_declared(self, request: GenerationRequest, *, streaming: bool) -> None:
+        """Refuse anything the script has not declared, without touching the catalogue.
+
+        Extracted from :meth:`_prepare` because :meth:`stream` has to run exactly these checks —
+        and no others — before it consults the cancellation token. A capability the provider never
+        declared is a malformed request whichever way the token points, and reporting it as a
+        cancellation would hide a caller's bug; everything after this line, by contrast, is
+        simulated I/O that a cancelled call never gets to perform.
+        """
         if streaming:
             self._require_capability("streaming", "stream a generation")
         if request.tools:
@@ -789,15 +921,6 @@ class FakeProvider:
                 self._require_capability("structured_output", "enforce a JSON Schema")
         if request.runtime_profile.context_size is not None:
             self._require_capability("context_configurable", "serve a caller-chosen context")
-        model = self._require_model(request.identity.provider_model_name)
-        prompt_text = _render_prompt(request)
-        prompt_tokens = _simulated_token_count(prompt_text)
-        self._check_context(request, prompt_tokens)
-        generation, generation_index = self._next_generation()
-        plan = self._build_plan(
-            request, model, generation, generation_index, prompt_text, prompt_tokens
-        )
-        return plan, self._effective_limit_ms(request)
 
     def _build_plan(
         self,

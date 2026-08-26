@@ -64,6 +64,9 @@ ignore = ["D100", "D104"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "D1"]
+# T201: scripts/ holds standalone CLI tools (doc regeneration); reporting what they did on stdout
+# is their entire user interface. The library itself still prints nothing (spec §17).
+"scripts/**" = ["T201"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

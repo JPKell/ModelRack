@@ -64,13 +64,13 @@ class _StubProvider:
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(streaming=True)
 
-    def list_models(self) -> Sequence[ModelDescriptor]:
+    def list_models(self, *, refresh: bool = False) -> Sequence[ModelDescriptor]:
         return ()
 
-    def inspect_model(self, identity: ModelIdentity) -> ModelDescriptor:
+    def inspect_model(self, identity: ModelIdentity, *, refresh: bool = False) -> ModelDescriptor:
         return ModelDescriptor(identity=identity, observed_at=utc_now())
 
-    def resolve(self, reference: str) -> ModelIdentity:
+    def resolve(self, reference: str, *, refresh: bool = False) -> ModelIdentity:
         return ModelIdentity(ProviderKind.FAKE, reference)
 
     def generate(self, request: GenerationRequest) -> GenerationResult:

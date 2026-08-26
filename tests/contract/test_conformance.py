@@ -147,6 +147,17 @@ class ProviderConformanceSuite:
         assert health.base_url.strip()
         assert isinstance(health.status, ProviderStatus)
 
+    def test_health_never_raises_however_the_probe_goes(self, provider: Provider) -> None:
+        """A negative answer is not an exceptional condition. An application's health endpoint
+        calls this precisely when it expects the answer might be no, and an adapter that raised
+        would turn a "provider is down" line in a health document into a 500 for the whole
+        endpoint.
+        """
+        health = provider.health()
+
+        assert health.status in set(ProviderStatus)
+        assert health.base_url
+
     def test_capabilities_are_a_stable_declaration_not_a_probe(self, provider: Provider) -> None:
         """Asked twice without a call in between, a declaration cannot have changed its mind."""
         assert provider.capabilities() == provider.capabilities()
@@ -371,6 +382,62 @@ class ProviderConformanceSuite:
             break
 
         assert provider.generate(self.request(identity)).identity.provider_model_name
+
+    def test_a_token_already_set_yields_exactly_one_terminal_event(
+        self, provider: Provider, identity: ModelIdentity, capabilities: ProviderCapabilities
+    ) -> None:
+        """Phase 5's hardening, as a contract rather than an adapter detail: a caller has one
+        cancellation path, not two. Delivered rather than raised, and nothing before it.
+        """
+        if not capabilities.streaming:
+            pytest.skip("not declared: refusal asserted above")
+        token = CancellationToken()
+        token.cancel()
+
+        events = list(provider.stream(self.request(identity, cancel=token)))
+
+        assert len(events) == 1
+        terminal = events[0]
+        assert isinstance(terminal, StreamFailed)
+        assert isinstance(terminal.error, GenerationCancelled)
+        assert terminal.partial_text == ""
+
+    def test_a_cancelled_provider_is_still_usable_afterwards(
+        self, provider: Provider, identity: ModelIdentity, capabilities: ProviderCapabilities
+    ) -> None:
+        """Whatever the adapter released on the way out, it released cleanly."""
+        if not capabilities.streaming:
+            pytest.skip("not declared: refusal asserted above")
+        token = CancellationToken()
+        token.cancel()
+        list(provider.stream(self.request(identity, cancel=token)))
+
+        assert provider.generate(self.request(identity)).identity.provider_model_name
+
+    # ------------------------------------------------------------------------- metadata reads
+
+    def test_refresh_is_accepted_by_every_adapter(
+        self, provider: Provider, known_reference: str
+    ) -> None:
+        """The ``refresh=True`` path the development plan names as the mitigation a TTL alone
+        cannot provide. An adapter that caches nothing accepts it and ignores it, so a caller
+        holding a :class:`~modelrack.Provider` never has to ask which kind it is holding.
+        """
+        cold = provider.list_models()
+        warm = provider.list_models(refresh=True)
+
+        assert [descriptor.identity for descriptor in warm] == [
+            descriptor.identity for descriptor in cold
+        ]
+        assert provider.resolve(known_reference, refresh=True) == provider.resolve(known_reference)
+
+    def test_a_refreshed_inspection_returns_the_same_model(
+        self, provider: Provider, identity: ModelIdentity
+    ) -> None:
+        assert (
+            provider.inspect_model(identity, refresh=True).identity.provider_model_name
+            == identity.provider_model_name
+        )
 
     # ---------------------------------------------------------------------- capability gating
 

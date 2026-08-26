@@ -36,11 +36,16 @@ from modelrack import (
     FinishReason,
     GenerationRequest,
     Message,
+    ProviderEvent,
+    ProviderEventKind,
     ProviderStatus,
     Role,
     StreamCompleted,
     StreamFailed,
     TokenDelta,
+    find_resident,
+    is_resident,
+    residency_support,
 )
 from modelrack.providers.ollama import OllamaProvider
 from modelrack.streaming import CancellationToken
@@ -52,6 +57,7 @@ pytestmark = pytest.mark.live
 
 _BASE_URL = os.environ.get("MODELRACK_OLLAMA_URL", "http://127.0.0.1:11434")
 _REQUIRE_OLLAMA = os.environ.get("MODELRACK_REQUIRE_OLLAMA") == "1"
+_LIVE_PROMPT = "Name one thing a KV cache stores."
 
 
 def _skip_or_fail(reason: str) -> None:
@@ -211,3 +217,70 @@ class TestResidency:
             entry.identity.provider_model_name == a_model.identity.provider_model_name
             for entry in resident_after
         )
+
+    def test_residency_helpers_read_a_real_report(
+        self, provider: OllamaProvider, a_model: ModelDescriptor
+    ) -> None:
+        """The helpers LoadCoach's scheduler branches on, against a real ``/api/ps`` rather than
+        a fixture — name matching has to hold when the identity a caller holds is digest-confident
+        and the provider's report is not (ADR-0024 §2).
+        """
+        assert residency_support(provider.capabilities()).is_manageable is True
+        provider.load(a_model.identity, RuntimeProfile())
+
+        assert is_resident(provider.list_resident(), a_model.identity) is True
+        entry = find_resident(provider.list_resident(), a_model.identity)
+        assert entry is not None
+        assert is_supported(entry.vram_bytes)
+
+        provider.unload(a_model.identity)
+        assert is_resident(provider.list_resident(), a_model.identity) is False
+
+
+class TestMetadataCache:
+    def test_a_warm_discovery_reuses_what_a_cold_one_read(self, provider: OllamaProvider) -> None:
+        """Spec §10 against a real server: the second listing is identical and, crucially, keeps
+        the instant the *first* one was read rather than re-stamping itself as fresh.
+        """
+        cold = provider.list_models(refresh=True)
+        warm = provider.list_models()
+
+        assert [descriptor.identity for descriptor in warm] == [
+            descriptor.identity for descriptor in cold
+        ]
+        assert [descriptor.observed_at for descriptor in warm] == [
+            descriptor.observed_at for descriptor in cold
+        ]
+        assert provider.metadata_cache_stats().hits > 0
+
+    def test_clearing_makes_the_next_read_cold(self, provider: OllamaProvider) -> None:
+        provider.list_models()
+        provider.clear_metadata_cache()
+
+        assert provider.metadata_cache_stats().entries == 0
+        assert provider.list_models()
+
+
+class TestObservability:
+    def test_a_real_stream_reports_started_chunks_and_completed(
+        self, provider: OllamaProvider, a_model: ModelDescriptor
+    ) -> None:
+        """Spec §17 against a real model: the event stream a host would log from, with no prompt
+        and no generated text anywhere in it.
+        """
+        seen: list[ProviderEvent] = []
+        observed = OllamaProvider(base_url=_BASE_URL, on_event=seen.append)
+        request = GenerationRequest(
+            identity=a_model.identity,
+            messages=(Message(role=Role.USER, content=_LIVE_PROMPT),),
+            metadata={"run_id": "live-smoke"},
+        )
+
+        list(observed.stream(request))
+
+        kinds = [event.kind for event in seen]
+        assert kinds[0] is ProviderEventKind.REQUEST_STARTED
+        assert kinds[-1] is ProviderEventKind.REQUEST_COMPLETED
+        assert ProviderEventKind.CHUNK_RECEIVED in kinds
+        assert all(event.metadata["run_id"] == "live-smoke" for event in seen)
+        assert _LIVE_PROMPT not in " ".join(repr(event) for event in seen)

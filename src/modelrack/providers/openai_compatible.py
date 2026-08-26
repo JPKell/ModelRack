@@ -68,6 +68,7 @@ import json
 import logging
 import ssl
 from collections.abc import Mapping
+from io import StringIO
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -82,22 +83,30 @@ from baseaicore import (
     utc_now,
 )
 
+from modelrack.cache import (
+    DEFAULT_METADATA_TTL_SECONDS,
+    CacheStats,
+    MetadataCache,
+    MetadataSnapshot,
+)
 from modelrack.errors import (
-    CapabilityUnsupported,
     ContextLimitExceeded,
     GenerationCancelled,
     ModelNotFound,
+    ProviderError,
     ProviderProtocolError,
     ProviderRejected,
     ProviderTimeout,
     ProviderUnavailable,
 )
+from modelrack.events import EventEmitter
 from modelrack.provider import (
     LoadResult,
     ProviderCapabilities,
     ProviderHealth,
     ProviderStatus,
     ResidentModel,
+    refuse_capability,
 )
 from modelrack.providers._http import (
     DEFAULT_MAX_CHUNK_BYTES,
@@ -111,6 +120,7 @@ from modelrack.providers._http import (
     truncated_text,
     validate_base_url,
 )
+from modelrack.residency import refuse_force_unload, refuse_residency_query
 from modelrack.streaming import (
     StreamCompleted,
     StreamFailed,
@@ -128,12 +138,12 @@ from modelrack.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator, Sequence
+    from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
     from datetime import datetime
-    from typing import NoReturn
 
     from baseaicore import RuntimeProfile
 
+    from modelrack.events import EventCallback
     from modelrack.streaming import StreamEvent
     from modelrack.types import GenerationRequest, ResponseFormat, ToolCall, ToolDefinition
 
@@ -169,6 +179,10 @@ tested" ADR-0007 rule 2 warns against).
 """
 
 _REQUEST_HEADERS: Final[dict[str, str]] = {"Content-Type": "application/json"}
+
+_MODELS_CACHE_KEY: Final[str] = "models"
+"""The metadata cache's only key. This protocol has one discovery endpoint and no per-model
+metadata call, so there is nothing else to hold."""
 
 _CONTEXT_OVERFLOW_CODES: Final[frozenset[str]] = frozenset({"context_length_exceeded"})
 
@@ -211,12 +225,21 @@ class OpenAICompatibleProvider:
         verify: TLS verification, passed to :class:`httpx.Client` unchanged.
         max_response_bytes: The total-body cap for a non-streamed response (spec §14).
         max_chunk_bytes: The per-line cap for a streamed response (spec §14).
+        metadata_ttl_seconds: How long a ``/v1/models`` body may be reused (spec §10, default
+            300 s). ``0`` disables the cache. This protocol has no per-model metadata endpoint,
+            so the listing is the only thing there is to cache.
+        on_event: An optional observer called as requests start, stream and finish (spec §17).
+            Receives no prompt, no generated text and — the reason it matters here rather than on
+            the Ollama adapter — no ``api_key``: :class:`~modelrack.events.ProviderEvent` has no
+            field a credential could reach, and a test asserts it stays out of the event stream
+            as well as out of ``raw``, ``details`` and the DEBUG log (spec §14).
         clock: Where a :class:`~baseaicore.ModelDescriptor`'s ``observed_at`` comes from, injected
-            so a test can freeze it (coding standards §5).
+            so a test can freeze it (coding standards §5). Read when the listing is fetched and
+            stored with it, so a cache hit reports when the server actually answered.
 
     Raises:
         ValidationError: If ``base_url`` has no host or uses a scheme other than ``http``/
-            ``https``.
+            ``https``, or if ``metadata_ttl_seconds`` is negative.
     """
 
     kind: ProviderKind = ProviderKind.OPENAI_COMPATIBLE
@@ -232,6 +255,8 @@ class OpenAICompatibleProvider:
         verify: ssl.SSLContext | str | bool = True,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
         max_chunk_bytes: int = DEFAULT_MAX_CHUNK_BYTES,
+        metadata_ttl_seconds: float = DEFAULT_METADATA_TTL_SECONDS,
+        on_event: EventCallback | None = None,
         clock: Callable[[], datetime] = utc_now,
     ) -> None:
         """Validate the base URL and construct or adopt the pooled HTTP client."""
@@ -241,6 +266,10 @@ class OpenAICompatibleProvider:
         self._max_response_bytes = max_response_bytes
         self._max_chunk_bytes = max_chunk_bytes
         self._clock = clock
+        self._cache: MetadataCache[MetadataSnapshot] = MetadataCache(
+            ttl_seconds=metadata_ttl_seconds
+        )
+        self._events = EventEmitter(on_event, provider_kind=self.kind)
         request_headers = {**_REQUEST_HEADERS, **(headers or {})}
         if api_key:
             request_headers["Authorization"] = f"Bearer {api_key}"
@@ -262,8 +291,12 @@ class OpenAICompatibleProvider:
 
         Returns:
             :attr:`~modelrack.provider.ProviderStatus.OK` with the model count on success;
-            :attr:`~modelrack.provider.ProviderStatus.UNAVAILABLE` — never a raised exception —
-            when the provider cannot be reached at all.
+            :attr:`~modelrack.provider.ProviderStatus.UNAVAILABLE` when the provider cannot be
+            reached at all; :attr:`~modelrack.provider.ProviderStatus.DEGRADED` when it answered
+            and refused. The third case matters more for this adapter than for Ollama's: a wrong
+            or expired ``api_key`` is a 401 from a server that is running perfectly well, and
+            reporting that as "unreachable" would send an operator to check the wrong thing
+            entirely. **Never a raised exception**, whichever of the three it is.
         """
         start_ns = monotonic_ns()
         try:
@@ -274,6 +307,17 @@ class OpenAICompatibleProvider:
                 base_url=self._base_url,
                 is_remote=self._is_remote,
                 detail="unreachable",
+                latency_ms=elapsed_ms(start_ns),
+            )
+        except ProviderError as exc:
+            # The server's own message is deliberately not repeated in a health detail — see
+            # `modelrack.providers.ollama.OllamaProvider.health`. It matters more here: this is
+            # the adapter with a credential, and a health document is rendered into a UI.
+            return ProviderHealth(
+                status=ProviderStatus.DEGRADED,
+                base_url=self._base_url,
+                is_remote=self._is_remote,
+                detail=f"reachable, but refused the probe ({exc.code})",
                 latency_ms=elapsed_ms(start_ns),
             )
         count = len(self._model_entries(payload))
@@ -294,8 +338,37 @@ class OpenAICompatibleProvider:
         """Report what this adapter can do — the static declaration, no request made."""
         return _CAPABILITIES
 
-    def list_models(self) -> Sequence[ModelDescriptor]:
+    # ------------------------------------------------------------------------- metadata cache
+
+    @property
+    def metadata_cache_ttl_seconds(self) -> float:
+        """How long a cached ``/v1/models`` body is reused, in seconds.
+
+        Returns:
+            The lifetime this adapter was constructed with; ``0.0`` when caching is disabled.
+        """
+        return self._cache.ttl_seconds
+
+    def metadata_cache_stats(self) -> CacheStats:
+        """Report what the metadata cache has done since construction or the last clear.
+
+        Returns:
+            A consistent snapshot of the hit, miss, expiry and store counters plus the current
+            entry count. Metadata only — no generation result ever enters the cache (spec §3).
+        """
+        return self._cache.stats()
+
+    def clear_metadata_cache(self) -> None:
+        """Drop the cached model listing and reset the cache counters (spec §10)."""
+        self._cache.clear()
+
+    def list_models(self, *, refresh: bool = False) -> Sequence[ModelDescriptor]:
         """List the models the server is serving.
+
+        Args:
+            refresh: Re-read ``/v1/models``, ignoring anything cached (spec §10). The
+                explicit escape hatch a TTL alone cannot provide, for a caller that has just
+                loaded a new model into the server.
 
         Returns:
             One descriptor per model. ``/v1/models`` carries an ``id`` and little else on most
@@ -307,16 +380,21 @@ class OpenAICompatibleProvider:
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        entries = self._model_entries(self._get_json("/v1/models"))
-        observed_at = self._clock()
-        return tuple(_build_descriptor(entry, observed_at=observed_at) for entry in entries)
+        snapshot = self._models_snapshot(refresh=refresh)
+        entries = self._model_entries(snapshot.payload)
+        return tuple(
+            _build_descriptor(entry, observed_at=snapshot.observed_at) for entry in entries
+        )
 
-    def inspect_model(self, identity: ModelIdentity) -> ModelDescriptor:
+    def inspect_model(self, identity: ModelIdentity, *, refresh: bool = False) -> ModelDescriptor:
         """Fetch metadata for one model.
 
         Args:
             identity: The model to inspect, matched on
                 :attr:`~baseaicore.ModelIdentity.provider_model_name`.
+            refresh: Re-read ``/v1/models``, ignoring anything cached (spec §10). The
+                explicit escape hatch a TTL alone cannot provide, for a caller that has just
+                loaded a new model into the server.
 
         Returns:
             The descriptor.
@@ -326,7 +404,7 @@ class OpenAICompatibleProvider:
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        descriptors = self.list_models()
+        descriptors = self.list_models(refresh=refresh)
         for descriptor in descriptors:
             if descriptor.identity.provider_model_name == identity.provider_model_name:
                 return descriptor
@@ -338,7 +416,7 @@ class OpenAICompatibleProvider:
             },
         )
 
-    def resolve(self, reference: str) -> ModelIdentity:
+    def resolve(self, reference: str, *, refresh: bool = False) -> ModelIdentity:
         """Resolve a user-supplied model reference to a concrete identity.
 
         Tries an exact ``id`` match, then a unique prefix over every known ``id``. Unlike
@@ -347,6 +425,9 @@ class OpenAICompatibleProvider:
 
         Args:
             reference: What the user typed.
+            refresh: Re-read ``/v1/models``, ignoring anything cached (spec §10). The
+                explicit escape hatch a TTL alone cannot provide, for a caller that has just
+                loaded a new model into the server.
 
         Returns:
             The resolved identity — always :attr:`~baseaicore.IdentityConfidence.NAME_ONLY`.
@@ -356,7 +437,7 @@ class OpenAICompatibleProvider:
             ProviderUnavailable: If the provider cannot be reached.
             ProviderTimeout: If it does not answer in time.
         """
-        descriptors = self.list_models()
+        descriptors = self.list_models(refresh=refresh)
         names = [descriptor.identity.provider_model_name for descriptor in descriptors]
         resolved = self._resolve_name(reference, names)
         identity = _identity_for(resolved)
@@ -375,7 +456,7 @@ class OpenAICompatibleProvider:
                 normative capability set has no separate "can load" flag
                 (ADR-0007 rule 2).
         """
-        self._require_capability("force_unload", "load a model on demand")
+        refuse_force_unload(action="load a model on demand")
 
     def unload(self, identity: ModelIdentity) -> bool:
         """Refuse: this protocol has no endpoint to evict a model on demand.
@@ -383,7 +464,7 @@ class OpenAICompatibleProvider:
         Raises:
             CapabilityUnsupported: Always — ``force_unload`` is declared ``False``.
         """
-        self._require_capability("force_unload", "evict a model on demand")
+        refuse_force_unload(action="evict a model on demand")
 
     def list_resident(self) -> Sequence[ResidentModel]:
         """Refuse: this protocol has no endpoint to report what is currently loaded.
@@ -391,7 +472,7 @@ class OpenAICompatibleProvider:
         Raises:
             CapabilityUnsupported: Always — ``residency_query`` is declared ``False``.
         """
-        self._require_capability("residency_query", "report which models are resident")
+        refuse_residency_query()
 
     # ------------------------------------------------------------------------ generation
 
@@ -419,6 +500,41 @@ class OpenAICompatibleProvider:
         """
         body = self._build_body(request, stream=False)
         start_ns = monotonic_ns()
+        self._events.started(
+            operation="generate",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+        )
+        try:
+            result = self._generate_once(request, body, start_ns)
+        except ProviderError as exc:
+            self._events.failed(
+                operation="generate",
+                model_name=request.identity.provider_model_name,
+                metadata=request.metadata,
+                error_code=exc.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise
+        self._events.completed(
+            operation="generate",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+            elapsed_ms=result.timing.client_wall_ms,
+            output_tokens=result.usage.tokens.output_tokens,
+            finish_reason=result.finish_reason.value,
+        )
+        return result
+
+    def _generate_once(
+        self, request: GenerationRequest, body: Mapping[str, Any], start_ns: int
+    ) -> GenerationResult:
+        """Run the round trip :meth:`generate` wraps in its event pair.
+
+        Split out for the same reason
+        :meth:`modelrack.providers.ollama.OllamaProvider._generate_once` is: so that every
+        ``raise`` below is reported as a failure without each one having to remember to say so.
+        """
         payload = self._post_json(
             "/v1/chat/completions",
             body,
@@ -465,7 +581,8 @@ class OpenAICompatibleProvider:
 
         Args:
             request: What to generate, and how. Its ``cancel`` token is honoured between SSE
-                events.
+                events. A token already set when this is called yields one terminal
+                :class:`~modelrack.streaming.StreamFailed` and opens no connection at all.
 
         Yields:
             Deltas, then one terminal event.
@@ -478,35 +595,132 @@ class OpenAICompatibleProvider:
             ProviderTimeout: If it does not answer in time.
         """
         body = self._build_body(request, stream=True)
+        if request.cancel is not None and request.cancel.is_cancelled:
+            return iter((self._already_cancelled(request),))
         start_ns = monotonic_ns()
+        self._events.started(
+            operation="stream",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+        )
         prepared = self._client.build_request(
             "POST", "/v1/chat/completions", json=body, timeout=self._timeout_for(request)
         )
         try:
             response = self._client.send(prepared, stream=True)
         except httpx.HTTPError as exc:
-            raise translate_transport_error(exc, base_url=self._base_url) from exc
+            error = translate_transport_error(exc, base_url=self._base_url)
+            self._events.failed(
+                operation="stream",
+                model_name=request.identity.provider_model_name,
+                metadata=request.metadata,
+                error_code=error.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise error from exc
         try:
             if response.status_code >= 400:
                 self._raise_for_status(
                     response, model_reference=request.identity.provider_model_name
                 )
+        except ProviderError as exc:
+            response.close()
+            self._events.failed(
+                operation="stream",
+                model_name=request.identity.provider_model_name,
+                metadata=request.metadata,
+                error_code=exc.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+            raise
         except BaseException:
             response.close()
             raise
         return self._walk(request, response, start_ns)
 
+    def _already_cancelled(self, request: GenerationRequest) -> StreamFailed:
+        """Return the terminal event for a stream whose token was already set before it began.
+
+        Opens no connection at all — see
+        :meth:`modelrack.providers.ollama.OllamaProvider._already_cancelled`, which this mirrors
+        exactly, because cancellation semantics belong to the protocol rather than to a wire
+        format (spec §11.6).
+        """
+        self._events.started(
+            operation="stream",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+        )
+        event = self._cancelled("")
+        self._events.failed(
+            operation="stream",
+            model_name=request.identity.provider_model_name,
+            metadata=request.metadata,
+            error_code=event.error.code,
+        )
+        return event
+
     def _walk(
         self, request: GenerationRequest, response: httpx.Response, start_ns: int
     ) -> Iterator[StreamEvent]:
+        """Observe every event :meth:`_drain` produces, then hand it on unchanged.
+
+        Mirrors :meth:`modelrack.providers.ollama.OllamaProvider._walk`, including the explicit
+        ``events.close()``: without it, the inner generator's ``finally`` — the one holding
+        ``response.close()`` — would run only when the garbage collector reached it.
+        """
+        model_name = request.identity.provider_model_name
+        events = self._drain(request, response, start_ns)
+        try:
+            for event in events:
+                self._observe(event, request, start_ns, model_name)
+                yield event
+        finally:
+            events.close()
+
+    def _observe(
+        self, event: StreamEvent, request: GenerationRequest, start_ns: int, model_name: str
+    ) -> None:
+        """Emit the observability event matching one stream event, if anyone is listening."""
+        if not self._events.is_observed:
+            return
+        if isinstance(event, StreamCompleted):
+            self._events.completed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                elapsed_ms=event.result.timing.client_wall_ms,
+                output_tokens=event.result.usage.tokens.output_tokens,
+                finish_reason=event.result.finish_reason.value,
+            )
+        elif isinstance(event, StreamFailed):
+            self._events.failed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                error_code=event.error.code,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+        else:
+            self._events.chunk(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                chunk_index=event.index,
+                elapsed_ms=elapsed_ms(start_ns),
+            )
+
+    def _drain(
+        self, request: GenerationRequest, response: httpx.Response, start_ns: int
+    ) -> Generator[StreamEvent, None, None]:
         """Drain one SSE stream, owning ``response`` for its entire remaining lifetime.
 
-        See :meth:`modelrack.providers.ollama.OllamaProvider._walk` for why this is a generator:
+        See :meth:`modelrack.providers.ollama.OllamaProvider._drain` for why this is a generator:
         ``GeneratorExit`` on abandonment runs the same ``finally`` a normal return does, which is
         what makes draining, breaking early and walking away all close the connection identically.
         """
         cancel = request.cancel
-        answer_parts: list[str] = []
+        answer = StringIO()
         tool_fragments: dict[int, dict[str, Any]] = {}
         tool_order: list[int] = []
         first_delta_ns: int | None = None
@@ -522,7 +736,7 @@ class OpenAICompatibleProvider:
             )
             for data in _iter_sse_events(lines):
                 if cancel is not None and cancel.is_cancelled:
-                    yield self._cancelled("".join(answer_parts))
+                    yield self._cancelled(answer.getvalue())
                     return
                 if data == "[DONE]":
                     seen_done = True
@@ -535,7 +749,7 @@ class OpenAICompatibleProvider:
                             f"A streamed event from {self._base_url} was not valid JSON.",
                             details={"base_url": self._base_url, "body": truncated_text(data)},
                         ),
-                        partial_text="".join(answer_parts),
+                        partial_text=answer.getvalue(),
                     )
                     return
                 if not isinstance(payload, dict):
@@ -544,7 +758,7 @@ class OpenAICompatibleProvider:
                             f"A streamed event from {self._base_url} was not a JSON object.",
                             details={"base_url": self._base_url, "body": truncated_text(data)},
                         ),
-                        partial_text="".join(answer_parts),
+                        partial_text=answer.getvalue(),
                     )
                     return
                 message, code = _extract_error(payload)
@@ -553,7 +767,7 @@ class OpenAICompatibleProvider:
                         error=self._build_message_error(
                             message, code=code, status_code=response.status_code
                         ),
-                        partial_text="".join(answer_parts),
+                        partial_text=answer.getvalue(),
                     )
                     return
 
@@ -566,7 +780,7 @@ class OpenAICompatibleProvider:
                 content = delta.get("content")
                 if isinstance(content, str) and content:
                     first_delta_ns = first_delta_ns or monotonic_ns()
-                    answer_parts.append(content)
+                    answer.write(content)
                     yield TokenDelta(text=content, index=delta_index)
                     delta_index += 1
                 raw_tool_calls = delta.get("tool_calls")
@@ -606,7 +820,7 @@ class OpenAICompatibleProvider:
                         f"The stream from {self._base_url} ended without a [DONE] sentinel.",
                         details={"base_url": self._base_url},
                     ),
-                    partial_text="".join(answer_parts),
+                    partial_text=answer.getvalue(),
                 )
                 return
 
@@ -618,7 +832,7 @@ class OpenAICompatibleProvider:
                 # always its own SSE event, never sharing an iteration with a content delta the
                 # way Ollama's terminal NDJSON line does, so a single-threaded test cannot land
                 # here deterministically. Kept as the honest defensive check for that race.
-                yield self._cancelled("".join(answer_parts))
+                yield self._cancelled(answer.getvalue())
                 return
             tool_calls = tuple(
                 _tool_call_from_parts(
@@ -633,7 +847,7 @@ class OpenAICompatibleProvider:
             ttft_ms = (
                 elapsed_ms(start_ns, first_delta_ns) if first_delta_ns is not None else UNSUPPORTED
             )
-            text = "".join(answer_parts)
+            text = answer.getvalue()
             yield StreamCompleted(
                 result=GenerationResult(
                     text=text,
@@ -652,13 +866,13 @@ class OpenAICompatibleProvider:
         except httpx.HTTPError as exc:
             yield StreamFailed(
                 error=translate_stream_interruption(exc, base_url=self._base_url),
-                partial_text="".join(answer_parts),
+                partial_text=answer.getvalue(),
             )
         except ProviderProtocolError as exc:
             # Raised by `iter_capped_lines` when a line exceeds the per-chunk cap — already a
             # typed error, delivered as a terminal event rather than re-raised because the stream
             # has already begun (spec §13, and modelrack.streaming's own terminal-event rule).
-            yield StreamFailed(error=exc, partial_text="".join(answer_parts))
+            yield StreamFailed(error=exc, partial_text=answer.getvalue())
         finally:
             response.close()
 
@@ -749,6 +963,23 @@ class OpenAICompatibleProvider:
         except httpx.HTTPError as exc:
             raise translate_transport_error(exc, base_url=self._base_url) from exc
 
+    def _models_snapshot(self, *, refresh: bool) -> MetadataSnapshot:
+        """Return ``/v1/models``'s body with the instant it was read, cached under one key.
+
+        The clock is read *after* the fetch returns, so ``observed_at`` names the moment the
+        server had answered rather than the moment this process decided to ask.
+        """
+        if not refresh:
+            cached = self._cache.get(_MODELS_CACHE_KEY)
+            if cached is not None:
+                return cached
+        payload = self._get_json("/v1/models")
+        snapshot = MetadataSnapshot(
+            observed_at=self._clock(), payload=payload if isinstance(payload, dict) else {}
+        )
+        self._cache.put(_MODELS_CACHE_KEY, snapshot)
+        return snapshot
+
     def _get_json(self, path: str) -> Any:  # noqa: ANN401 — the provider's own JSON shape
         """GET a path and return the parsed JSON response, translating every failure."""
         try:
@@ -793,14 +1024,6 @@ class OpenAICompatibleProvider:
             details={"reference": reference, "known_model_count": len(names)},
         )
 
-    def _require_capability(self, capability: str, action: str) -> NoReturn:
-        """Raise :class:`CapabilityUnsupported` naming ``capability``; it is never declared."""
-        raise CapabilityUnsupported(
-            f"This provider does not declare {capability!r} and cannot {action}. Check "
-            "capabilities() and branch, rather than assuming.",
-            details={"capability": capability},
-        )
-
     def _build_body(self, request: GenerationRequest, *, stream: bool) -> dict[str, Any]:
         """Build the ``/v1/chat/completions`` request body.
 
@@ -814,7 +1037,7 @@ class OpenAICompatibleProvider:
         in tension the way they are for Ollama's ``/api/generate``.
         """
         if request.runtime_profile.context_size is not None:
-            self._require_capability("context_configurable", "serve a caller-chosen context")
+            refuse_capability("context_configurable", action="serve a caller-chosen context")
         messages = request.messages or (Message(role=Role.USER, content=request.prompt or ""),)
         body: dict[str, Any] = {
             "model": request.identity.provider_model_name,

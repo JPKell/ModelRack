@@ -2,13 +2,16 @@
 
 The suite's only model client: a provider-neutral abstraction over local inference runtimes (Ollama first), with a deterministic FakeProvider.
 
-**Status:** `0.4.0` — Phases 1–4 complete. The provider-neutral vocabulary, the streamed-event
-union and the `Provider` protocol exist and type-check; a deterministic, scriptable `FakeProvider`
-ships in `modelrack.testing`; and two real adapters — `OllamaProvider` and
+**Status:** `0.5.0` — **Phases 1–5 complete; the package is feature-complete against its
+[specification](docs/packages/modelrack/spec.md).** The provider-neutral vocabulary, the
+streamed-event union and the `Provider` protocol exist and type-check; a deterministic, scriptable
+`FakeProvider` ships in `modelrack.testing`; two real adapters — `OllamaProvider` and
 `OpenAICompatibleProvider` — talk to a real Ollama server and an OpenAI-compatible one (llama.cpp
 server, LM Studio, …) over HTTP, both proven against the same conformance suite the fake proves
-itself against. See the [development plan](docs/packages/modelrack/development-plan.md) for what
-each phase adds.
+itself against; and Phase 5 adds the operational surface LoadCoach depends on — residency with
+capability gating, hardened cancellation, an explicit metadata cache, and an optional `on_event`
+observability hook. See the [development plan](docs/packages/modelrack/development-plan.md) for
+what each phase adds, and the [quickstart](docs/quickstart.md) to run something in five minutes.
 
 Part of the **Local AI Suite**.
 
@@ -20,7 +23,8 @@ pip install modelrack
 
 ## Quickstart
 
-Application code takes a `Provider` and never names one:
+A fuller tour lives in [docs/quickstart.md](docs/quickstart.md). The shape of it: application code
+takes a `Provider` and never names one:
 
 ```python
 from baseaicore import ModelIdentity
@@ -181,12 +185,79 @@ print(summarize(provider, identity, "a long document"))
 ```
 
 Its `capabilities()` is honestly different from Ollama's, not merely a subset asserted the same
-way: no digest anywhere in `/v1/models` (every identity is `NAME_ONLY`), no residency-control
+way — the full comparison is [docs/providers.md](docs/providers.md), generated from the adapters'
+own declarations so it cannot drift away from them: no digest anywhere in `/v1/models` (every identity is `NAME_ONLY`), no residency-control
 endpoint (`load`, `unload` and `list_resident` all refuse with `CapabilityUnsupported`), and no
 per-request field to set a served context length (`context_configurable` is `False`, refused
 before a request is sent rather than silently ignored). Fixtures live under
 `tests/fixtures/providers/openai_compatible/`, representative of
 llama.cpp server and LM Studio; there is no live-server suite for this adapter yet.
+
+## Residency, cancellation, caching and events
+
+The four operational features Phase 5 adds. Each is a promise a scheduler can build on rather than
+a convenience.
+
+**Residency is a branch, not a `try`.** LoadCoach asks what it may do before it does it, and a
+provider that cannot manage residency refuses with `CapabilityUnsupported` naming the flag —
+never a silent no-op that would leave a scheduler believing it had evicted something:
+
+```python
+from baseaicore import RuntimeProfile
+from modelrack import find_resident, residency_support
+
+support = residency_support(provider.capabilities())
+if support.is_manageable:
+    loaded = provider.load(identity, RuntimeProfile())
+    loaded.already_resident  # a warm model measured as a cold start is an order of magnitude out
+    entry = find_resident(provider.list_resident(), identity)
+    provider.unload(identity)  # False when it was not loaded — the state you wanted, not a failure
+```
+
+**Cancellation stops within one chunk, preserves what was generated, and leaks nothing.** Every
+exit path — drained, cancelled, abandoned, failed mid-flight, refused before it began — releases
+the response body, asserted by a connection-counting transport in
+[`tests/unit/test_cancellation.py`](tests/unit/test_cancellation.py) across a hundred sequential
+streams. A token already set before `stream()` is called opens no connection at all.
+
+**Metadata is cached; a generation never is.** Discovery costs one `/api/tags` plus one
+`/api/show` per model, which is why spec §15 budgets a cold twenty-model listing in seconds and a
+warm one in ten milliseconds. A generation is not a fact about anything — two identical requests
+are two runs — so nothing puts a `GenerationResult` in the cache, and a test asserts it. Residency
+and health are never cached either: both are live state whose stale answer is worse than no answer.
+
+```python
+provider = OllamaProvider(metadata_ttl_seconds=300)  # spec §10's default; 0 disables it
+provider.list_models()  # cold
+provider.list_models()  # warm
+provider.list_models(refresh=True)  # a tag was just re-pulled: read it again now
+provider.metadata_cache_stats()  # hits, misses, expirations, stores, entries
+provider.clear_metadata_cache()
+```
+
+A cached descriptor keeps the instant the provider actually answered, so `observed_at` never claims
+a freshness the data does not have.
+
+**Events carry no content.** `on_event` reports requests starting, chunking, completing and
+failing, so an application can emit its own structured logs without ModelRack knowing what a run
+is. A `ProviderEvent` has no field a prompt, a generated token, a tool argument or an API key could
+reach — that is the enforcement, not a convention — and it passes through the caller's own
+`metadata` correlation identifiers, which are never sent to the provider:
+
+```python
+from modelrack import ProviderEvent, ProviderEventKind
+
+
+def log(event: ProviderEvent) -> None:
+    if event.kind is ProviderEventKind.REQUEST_COMPLETED:
+        emit_metric(event.operation, event.elapsed_ms, run_id=event.metadata["run_id"])
+
+
+provider = OllamaProvider(on_event=log)
+```
+
+A callback that raises is logged at DEBUG and does not disturb the generation — a completed result
+destroyed by a bug in a metrics hook would be a far worse outcome than a missing log line.
 
 ## Documentation
 
@@ -194,6 +265,8 @@ Project documentation lives under [`docs/`](docs/README.md). Start with [`docs/R
 
 | Read this | For |
 |---|---|
+| [docs/quickstart.md](docs/quickstart.md) | Getting something running, then everything the client can do, in ten short sections |
+| [docs/providers.md](docs/providers.md) | Which adapter declares which capability, and what branching on each one buys you. Generated from the adapters themselves |
 | [docs/packages/modelrack/spec.md](docs/packages/modelrack/spec.md) | Purpose, scope, non-goals, public contracts, configuration, acceptance criteria |
 | [docs/packages/modelrack/development-plan.md](docs/packages/modelrack/development-plan.md) | The phased build plan: goals, work, tests, acceptance criteria per phase |
 
@@ -203,7 +276,11 @@ Project documentation lives under [`docs/`](docs/README.md). Start with [`docs/R
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pre-commit install
-pytest -m "not live and not performance"
+
+ruff format --check . && ruff check . && mypy src tests && lint-imports
+pytest -m "not live and not performance"      # the default gate; coverage floor 95%
+pytest -m performance                          # spec §15's overhead budgets, nightly
+pytest -m live                                 # needs a real Ollama; skips if none is reachable
 ```
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full workflow and [`SECURITY.md`](SECURITY.md) for

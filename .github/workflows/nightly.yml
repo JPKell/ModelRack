@@ -1,0 +1,43 @@
+name: Nightly
+
+# The two suites the default gate deliberately excludes
+# (testing standards §10): `performance` asserts wall-clock
+# budgets, which are a flake generator on a shared runner under PR load, and `live` needs a real
+# Ollama. Both are real coverage, so they run on a schedule rather than not at all — a marked test
+# that never runs anywhere is an untested behaviour with a green tick beside it.
+
+on:
+  schedule:
+    # 04:00 UTC, off the busiest window for GitHub's shared runners.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  performance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      # Spec §15's overhead budgets, measured against a transport that does no I/O, so what the
+      # clock sees is this package's own work rather than a provider's.
+      - run: pytest -m performance -p no:randomly
+
+  live:
+    # No hosted runner has an Ollama, so this needs a self-hosted machine with one. Until the
+    # suite has that machine, the job is present and disabled rather than absent: the command it
+    # would run is the thing worth keeping under review.
+    if: false
+    runs-on: [self-hosted, ollama]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e ".[dev]"
+      # MODELRACK_REQUIRE_OLLAMA=1 turns an unreachable provider from a skip into a failure: a
+      # silently skipped provider is an untested provider, and a nightly hardware job is exactly
+      # where that must not be allowed to hide.
+      - run: pytest -m live -p no:randomly
+        env:
+          MODELRACK_REQUIRE_OLLAMA: "1"

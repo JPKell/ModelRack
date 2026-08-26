@@ -6,10 +6,13 @@ that FreeWeight, LoadCoach and IdeaPress never contain provider HTTP code, never
 JSON, and never disagree about what a token count or a timing means
 ([spec §1](../../docs/packages/modelrack/spec.md)).
 
-What is exported below is the public API as of Phase 4
+What is exported below is the public API as of Phase 5
 (``docs/packages/modelrack/development-plan.md``): the provider-neutral request and result
 vocabulary, the streamed-event union with its cancellation token, the ``Provider`` protocol and the
-types describing what a provider is, and the full error hierarchy.
+types describing what a provider is, the full error hierarchy, and the three operational modules
+Phase 5 added — the residency vocabulary (:mod:`modelrack.residency`), the one metadata cache this
+package is allowed to have (:mod:`modelrack.cache`), and the optional observability hook
+(:mod:`modelrack.events`).
 
 The first adapter that ships is the **fake** one, deliberately
 (ADR-0007 rule 6): ``FakeProvider`` is imported from
@@ -44,6 +47,12 @@ about its own work is never merged with what this process *observed*, which is w
 from __future__ import annotations
 
 from modelrack.__about__ import __version__
+from modelrack.cache import (
+    DEFAULT_METADATA_TTL_SECONDS,
+    CacheStats,
+    MetadataCache,
+    MetadataSnapshot,
+)
 from modelrack.errors import (
     CapabilityUnsupported,
     ContextLimitExceeded,
@@ -56,6 +65,11 @@ from modelrack.errors import (
     ProviderUnavailable,
     ProviderUnavailableReason,
 )
+from modelrack.events import (
+    EventCallback,
+    ProviderEvent,
+    ProviderEventKind,
+)
 from modelrack.provider import (
     LoadResult,
     Provider,
@@ -63,6 +77,16 @@ from modelrack.provider import (
     ProviderHealth,
     ProviderStatus,
     ResidentModel,
+    refuse_capability,
+    require_capability,
+)
+from modelrack.residency import (
+    FORCE_UNLOAD,
+    RESIDENCY_QUERY,
+    ResidencySupport,
+    find_resident,
+    is_resident,
+    residency_support,
 )
 from modelrack.streaming import (
     CancellationToken,
@@ -90,6 +114,10 @@ from modelrack.types import (
 )
 
 __all__ = [
+    "DEFAULT_METADATA_TTL_SECONDS",
+    "FORCE_UNLOAD",
+    "RESIDENCY_QUERY",
+    "CacheStats",
     "CancellationToken",
     "CapabilityUnsupported",
     "ContextLimitExceeded",
@@ -126,5 +154,16 @@ __all__ = [
     "ToolCall",
     "ToolCallDelta",
     "ToolDefinition",
+    "EventCallback",
+    "MetadataCache",
+    "MetadataSnapshot",
+    "ProviderEvent",
+    "ProviderEventKind",
+    "ResidencySupport",
+    "find_resident",
+    "is_resident",
+    "refuse_capability",
+    "require_capability",
+    "residency_support",
     "__version__",
 ]
