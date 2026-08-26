@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:   # manual TestPyPI dry run; see publish-testpypi below
 
 permissions:
   id-token: write   # required for PyPI Trusted Publishing
