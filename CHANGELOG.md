@@ -170,6 +170,14 @@ the convenience, and each has a test that fails when the guarantee stops holding
   softened, and Phase 5's file list had lost the same file. The mirror is a downstream copy and is
   now re-synced with the master.
 
+### Documentation
+- [Spec §7](docs/packages/modelrack/spec.md)'s protocol listing now shows the `refresh` keyword,
+  and §10 states why it is on the protocol rather than on the adapters: a caller holding a
+  `Provider` must be able to force a re-read without downcasting to a concrete adapter, which is
+  the thing the abstraction exists to prevent. The development plan already required "TTL **plus**
+  an explicit `refresh=True` path"; §7 had simply not been updated to match, and the specification
+  is the authority, so the specification is what moved.
+
 ### Notes
 - Coverage is 100 % of statements and branches, against a floor of 95 %.
 - No Ollama, no GPU and no network are needed for the default suite; the socket guard in
