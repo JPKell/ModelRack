@@ -97,6 +97,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # gitleaks scans *history*, and `actions/checkout` fetches a single commit by default.
+        # For a push it is handed `<first-pushed>^..<last-pushed>`, so the parent of the first
+        # pushed commit has to be in the object store; in a depth-1 clone it is not, and git
+        # answers "unknown revision", which the action reports as exit code 1. It fails the same
+        # way whether or not a secret exists, so a green run would not have meant anything either.
+        with: { fetch-depth: 0 }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install pip-audit
