@@ -110,14 +110,14 @@ timings and digests captured.
   heads, head dimension, embedding dimension, vocab size, licence — with `raw` preserved. **Digests
   normalized through `baseaicore.normalize_digest`** to `"sha256:" + 64 lowercase hex`; a value that
   will not normalize is discarded with a reason and yields a `name_only` identity, never a malformed
-  one (ADR-0024 §2).
+  one ([ADR-0024 §2](../../adr/0024-canonical-id-and-model-references.md)).
 * Timing extraction: `load_duration`, `prompt_eval_duration`, `eval_duration`, `total_duration`
   mapped to `Timing.backend_*`; client-observed wall time and TTFT measured with
   `time.perf_counter_ns()` into `Timing.client_*`.
 * Error translation for every row of the spec's §13 table.
 * Capability declaration for Ollama, including `token_level_chunks` and `context_configurable` set
   truthfully — the latter is what tells a caller whether it may set a served context or must record
-  one as assumed (ADR-0023 §4).
+  one as assumed ([ADR-0023 §4](../../adr/0023-runtime-profile-resolution.md)).
 * Recorded fixtures captured from Ollama 0.32.13, each annotated with the provider version.
 
 **Files/subsystems**
@@ -153,14 +153,16 @@ tests/live/test_ollama_live.py           # marked
 `UNSUPPORTED` for anything missing, `raw` preservation, and version-annotated fixtures.
 **Likely failure modes:** treating a missing token count as 0; mislabelling chunk latency as token
 latency; losing the digest and silently producing `name_only` identities.
-**Gold standards:** one Ollama client for the whole suite; unsupported-safe normalization; typed errors.
+**Gold standards:** one Ollama client for the whole suite; unsupported-safe normalization; typed
+errors.
 **Deferred:** OpenAI-compatible adapter; llama.cpp; vLLM.
 
 ---
 
 ## Phase 4 — OpenAICompatibleProvider and capability honesty
 
-**Goal:** a second real adapter proves the abstraction is not Ollama-shaped, and capability declarations become load-bearing.
+**Goal:** a second real adapter proves the abstraction is not Ollama-shaped, and capability
+declarations become load-bearing.
 
 **Prerequisites:** Phase 3.
 
