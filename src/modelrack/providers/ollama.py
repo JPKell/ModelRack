@@ -595,8 +595,14 @@ class OllamaProvider:
         built = [build_resident_model(entry) for entry in entries]
         built.sort(key=lambda item: item[0].provider_model_name)
         return tuple(
-            ResidentModel(identity=identity, vram_bytes=vram, total_bytes=total, expires_at=expires)
-            for identity, vram, total, expires in built
+            ResidentModel(
+                identity=identity,
+                vram_bytes=vram,
+                total_bytes=total,
+                expires_at=expires,
+                context_length=context_length,
+            )
+            for identity, vram, total, expires, context_length in built
         )
 
     # ------------------------------------------------------------------------ generation

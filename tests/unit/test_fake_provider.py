@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from baseaicore import (
+    UNSUPPORTED,
     IdentityConfidence,
     ModelCapabilityFlag,
     ModelIdentity,
@@ -1199,6 +1200,26 @@ class TestResidency:
 
         assert entry.vram_bytes == DEFAULT_MODEL.vram_bytes
         assert entry.expires_at is None
+
+    def test_resident_entries_report_a_scripted_served_context(self) -> None:
+        """ADR-0023 §4's *reported* served context, only when the script declares one.
+
+        Parity with the real adapters: a field a real provider can report, the fake can report —
+        and one the script does not declare stays ``UNSUPPORTED``, never an invented number and
+        never ``max_context`` standing in for it.
+        """
+        models = (
+            FakeModel(name="says", context_length=2048),
+            FakeModel(name="silent"),
+        )
+        provider = _provider(FakeScript(models=models))
+        for name in ("says", "silent"):
+            provider.load(provider.resolve(name), RuntimeProfile())
+
+        by_name = {entry.identity.provider_model_name: entry for entry in provider.list_resident()}
+
+        assert by_name["says"].context_length == 2048
+        assert by_name["silent"].context_length is UNSUPPORTED
 
     def test_reset_evicts_everything(self) -> None:
         provider = _provider()

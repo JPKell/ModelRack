@@ -26,6 +26,7 @@ import httpx
 import pytest
 import respx
 from baseaicore import (
+    UNSUPPORTED,
     IdentityConfidence,
     ModelCapabilityFlag,
     ModelIdentity,
@@ -1576,6 +1577,49 @@ class TestResidency:
         assert entries[0].vram_bytes == 9_895_000_000
         assert entries[0].total_bytes == 9_895_000_000
         assert entries[0].expires_at is not None
+
+    @respx.mock
+    def test_list_resident_reports_the_context_it_is_actually_served_at(self) -> None:
+        """ADR-0023 §4's *reported* served context, which is not the advertised maximum.
+
+        A descriptor's ``max_context`` says what the weights can do; this says what the running
+        instance was configured to do. They differ whenever anything set ``num_ctx``, and a
+        consumer that could not tell them apart would have to assume the larger one.
+        """
+        respx.get(f"{_BASE_URL}/api/ps").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": _MODEL,
+                            "digest": "a" * 64,
+                            "size": 5_274_117_078,
+                            "size_vram": 5_274_117_078,
+                            "context_length": 2048,
+                        }
+                    ]
+                },
+            )
+        )
+
+        entries = _provider().list_resident()
+
+        assert entries[0].context_length == 2048
+
+    @respx.mock
+    def test_a_provider_that_does_not_report_context_says_unsupported(self) -> None:
+        """Never a zero, and never the advertised maximum standing in for it (ADR-0016 §4)."""
+        respx.get(f"{_BASE_URL}/api/ps").mock(
+            return_value=httpx.Response(
+                200,
+                json={"models": [{"name": _MODEL, "digest": "a" * 64, "size": 1, "size_vram": 1}]},
+            )
+        )
+
+        entries = _provider().list_resident()
+
+        assert entries[0].context_length is UNSUPPORTED
 
     @respx.mock
     def test_list_resident_sorts_by_name(self) -> None:

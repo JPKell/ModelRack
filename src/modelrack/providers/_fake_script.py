@@ -303,6 +303,11 @@ class FakeModel:
         vram_bytes: Device memory this model occupies once resident. Per device, never summed
             (ADR-0027).
         total_bytes: Device and host memory together once resident.
+        context_length: The context a resident instance reports being served at — ADR-0023 §4's
+            *reported* served context, distinct from ``max_context``, the advertised maximum.
+            Scripting the two differently is how a consumer's preference for the reported value
+            over the advertised one gets tested. ``UNSUPPORTED`` when the script does not say,
+            exactly as a provider that does not expose it.
         load_ms: How long this model takes to load. ``UNSUPPORTED`` produces a
             :class:`~modelrack.provider.LoadResult` that says so rather than one claiming an
             instantaneous load.
@@ -334,6 +339,7 @@ class FakeModel:
     license_text: str | None = None
     vram_bytes: Measurement = UNSUPPORTED
     total_bytes: Measurement = UNSUPPORTED
+    context_length: Measurement = UNSUPPORTED
     load_ms: Measurement = UNSUPPORTED
     raw: Mapping[str, Any] = field(default_factory=dict)
 

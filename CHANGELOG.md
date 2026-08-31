@@ -7,6 +7,23 @@ packaging and release standards §3.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-31
+
+One field: the served context a provider actually reports. ADR-0023 §4 distinguishes a *reported*
+served context from an *assumed* one, and until now no adapter had anywhere to put the reported
+value — every consumer's resolution fell through to the descriptor's advertised maximum, which is
+frequently many times larger than what the running instance was configured to serve.
+
+### Added
+- `ResidentModel.context_length`: the context a resident instance is **actually being served
+  at**, where the provider reports it — ADR-0023 §4's *reported* served context, not the
+  advertised maximum a descriptor already carries. `UNSUPPORTED` where the provider does not
+  say — never a zero, and never the advertised maximum standing in for it (ADR-0016). The
+  Ollama adapter fills it from `/api/ps`'s `context_length` (absent on older Ollama versions,
+  which stays `UNSUPPORTED`); `FakeModel.context_length` gives the fake the same reportable
+  field, so a consumer's preference for the reported value over the advertised one is testable
+  against a script.
+
 ## [0.5.0] — 2026-08-26
 
 Phase 5 of the [development plan](docs/packages/modelrack/development-plan.md), and the last one:

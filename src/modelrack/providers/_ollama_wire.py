@@ -241,15 +241,21 @@ def _declared_capabilities(value: Any) -> frozenset[ModelCapabilityFlag]:  # noq
 
 def build_resident_model(
     entry: Mapping[str, Any],
-) -> tuple[ModelIdentity, Measurement, Measurement, datetime | None]:
+) -> tuple[ModelIdentity, Measurement, Measurement, datetime | None, Measurement]:
     """Parse one ``/api/ps`` entry into the pieces :class:`~modelrack.provider.ResidentModel` needs.
 
     Returns:
-        ``(identity, vram_bytes, total_bytes, expires_at)``. Ollama reports one VRAM figure per
-        model, not per device — passed through as the single number the provider gave, which is
-        not the same thing as this package summing across devices itself
+        ``(identity, vram_bytes, total_bytes, expires_at, context_length)``. Ollama reports one
+        VRAM figure per model, not per device — passed through as the single number the provider
+        gave, which is not the same thing as this package summing across devices itself
         (ADR-0027 constrains *this package's*
         arithmetic, not what a provider chooses to report as one figure).
+
+        ``context_length`` is the context the model is **actually being served at**, which is not
+        the same as the context its descriptor advertises and is the only way to know the
+        difference without having asked for one. A consumer resolving a served context prefers a
+        reported value over an assumed one for exactly this reason
+        (ADR-0023 §4).
     """
     name = entry.get("name") or entry.get("model") or ""
     identity = identity_for(str(name), entry.get("digest"))[0]
@@ -260,6 +266,7 @@ def build_resident_model(
         as_measurement(entry.get("size_vram")),
         as_measurement(entry.get("size")),
         expires_at,
+        as_measurement(entry.get("context_length")),
     )
 
 

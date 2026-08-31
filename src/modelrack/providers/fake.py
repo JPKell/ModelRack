@@ -668,6 +668,9 @@ class FakeProvider:
             loaded, which is different from being unable to answer — that raises instead.
             ``expires_at`` is always ``None``: the fake schedules no eviction, and inventing a
             deadline would let a consumer's expiry display pass without a provider that has one.
+            ``context_length`` is whatever the script declares and ``UNSUPPORTED`` when it does
+            not — a served context is reported only when the author said one, never invented
+            (ADR-0023 §4).
 
         Raises:
             CapabilityUnsupported: If ``residency_query`` is not declared.
@@ -686,6 +689,7 @@ class FakeProvider:
                 identity=self._identity_for(by_name[name])[0],
                 vram_bytes=by_name[name].vram_bytes,
                 total_bytes=by_name[name].total_bytes,
+                context_length=by_name[name].context_length,
             )
             for name in resident
         )

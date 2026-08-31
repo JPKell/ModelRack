@@ -201,6 +201,12 @@ class ResidentModel:
         vram_bytes: Device memory the model occupies. Per device and never summed across a
             machine (ADR-0027).
         total_bytes: Total memory the model occupies, device and host together.
+        context_length: The context this instance is **actually being served at**, where the
+            provider reports it. Not the model's advertised maximum, which a descriptor already
+            carries and which is frequently many times larger: the two differ whenever anything
+            configured the context, and the difference is the whole of ADR-0023 §4's distinction
+            between a *reported* served context and an *assumed* one. ``UNSUPPORTED`` where the
+            provider does not say, which is a fact about the provider and never a zero.
         expires_at: When the provider intends to evict it, where the provider says so — Ollama's
             ``keep_alive`` produces exactly this. ``None`` when the provider does not schedule
             eviction or does not report it.
@@ -210,6 +216,7 @@ class ResidentModel:
     vram_bytes: Measurement = UNSUPPORTED
     total_bytes: Measurement = UNSUPPORTED
     expires_at: datetime | None = None
+    context_length: Measurement = UNSUPPORTED
 
 
 def refuse_capability(capability: str, *, action: str) -> NoReturn:
