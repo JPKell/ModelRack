@@ -156,7 +156,12 @@ downcasting to a concrete adapter; an adapter that caches nothing accepts it and
 
 1. Applications never see provider JSON except through `raw`, which is diagnostics only.
 2. Every unavailable measurement is `UNSUPPORTED`, never zero
-   ([ADR-0016](../../adr/0016-unavailable-is-not-zero.md)).
+   ([ADR-0016](../../adr/0016-unavailable-is-not-zero.md)) — and a token class the wire protocol
+   has no way to bill is zero, never unavailable. The rule is per response: cache detail the
+   protocol can express but a response omits means the server does no cache accounting (both
+   cache classes `0`); cache detail that is present is reconciled into the disjoint classes; a
+   response with no usage object at all reports every class `UNSUPPORTED`
+   ([ADR-0070](../../adr/0070-an-absent-token-class-is-zero-only-where-the-protocol-cannot-bill-it.md)).
 3. Backend-reported timings and client-observed timings are separate fields and are never merged.
 4. `token_level_chunks` gates any per-token latency claim; when false, inter-chunk latency is exactly
    that, and callers must not relabel it.
@@ -240,7 +245,7 @@ local installation.
 
 | Area | Tests |
 |---|---|
-| Conformance suite | Runs against `FakeProvider`, `OllamaProvider` (recorded), `OpenAICompatibleProvider` (recorded): discovery, inspect, generate, stream, cancel, errors, capabilities |
+| Conformance suite | Runs against `FakeProvider`, `OllamaProvider` (recorded), `OpenAICompatibleProvider` (recorded): discovery, inspect, generate, stream, cancel, errors, capabilities; usage per ADR-0070 — no cache detail → cache classes `0` and an estimate that totals, cache detail → disjoint classes, no usage object → every class `UNSUPPORTED` |
 | Ollama adapter | Recorded `/api/tags`, `/api/show`, `/api/chat`, `/api/generate`, `/api/ps` responses; timing extraction; digest extraction; multi-model listing |
 | Metadata normalization | Every architecture field present/absent; malformed values → `UNSUPPORTED`; `raw` preserved byte-for-byte |
 | Streaming | Ordered deltas, terminal event, truncated stream, mid-stream error, cancellation, chunk-size variance, unicode split across chunks |
