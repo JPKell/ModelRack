@@ -1,0 +1,16 @@
+{
+  "id": "chatcmpl-8f2a1e",
+  "object": "chat.completion",
+  "created": 1755878563,
+  "model": "qwen3.5-9b-instruct-q8_0",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "KV caching stores previously computed key/value tensors so they are not recomputed."
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}

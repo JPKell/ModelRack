@@ -433,20 +433,51 @@ def read_backend_timing(payload: Mapping[str, Any]) -> Timing:
 def read_usage(payload: Mapping[str, Any], *, text: str) -> GenerationUsage:
     """Build a :class:`~modelrack.types.GenerationUsage` from Ollama's count fields and the answer.
 
-    ``prompt_eval_count`` and ``eval_count`` are Ollama's token counts, mapped to the billing
-    vocabulary's ``input_tokens``/``output_tokens`` — Ollama reports no cache-aware billing, so
-    both cache classes stay :data:`~baseaicore.UNSUPPORTED` rather than being invented as zero
-    (ADR-0016). Character, word and byte
-    counts are observations this process can make about the string it is holding regardless of
-    what the provider counted, so they are always present.
+    **What this protocol can bill.** Ollama's generation responses carry exactly two count fields,
+    ``prompt_eval_count`` and ``eval_count``, mapped to the billing vocabulary's ``input_tokens``
+    and ``output_tokens``. There is no cache-billing vocabulary anywhere in the protocol — no
+    field, in any response shape, by which Ollama could charge for a cache read or a cache write —
+    so both cache classes are ``0``: not an invented zero, but the statement that nothing could
+    have been billed under those headings
+    (ADR-0070 decision 3, which is
+    ADR-0016's rule applied rather than
+    reversed — a measurement this adapter cannot obtain is still ``UNSUPPORTED``, and the two
+    cases are distinguished below).
+
+    **What ``prompt_eval_count`` counts: the whole prompt, not the tokens evaluated.** Ollama
+    reuses its KV cache across requests that share a prefix, which raises the question of whether
+    this field reports the work done or the prompt submitted. It reports the prompt submitted.
+    Measured against Ollama 0.32.13 on ``/api/chat`` with ``gemma3:latest``: two back-to-back
+    requests sharing a 5 400-token prefix and differing only in a short tail both reported
+    ``prompt_eval_count`` 5 410, while ``prompt_eval_duration`` fell from 885 ms to 126 ms — the
+    cache demonstrably served the prefix, and the count did not move. So ``input_tokens`` here is
+    the prompt length, the same quantity every other adapter reports, and a caller comparing token
+    counts across providers is comparing like with like. A token brake reading this field brakes
+    on prompt size, not on work performed, and a cached prefix costs the brake full price.
+
+    **No counts at all is not zero counts.** A terminal payload carrying neither count field —
+    Ollama's analogue of a response with no ``usage`` object — reports every class
+    ``UNSUPPORTED``, including the cache classes. Nothing was reported, so nothing is known; that
+    is the third of ADR-0070's three cases and the one where a zero would be a fabrication.
+
+    Character, word and byte counts are observations this process can make about the string it is
+    holding regardless of what the provider counted, so they are always present.
     """
     from baseaicore import TokenUsage  # noqa: PLC0415 — avoids a module-level cycle with types.py
 
-    return GenerationUsage(
-        tokens=TokenUsage(
+    reports_counts = "prompt_eval_count" in payload or "eval_count" in payload
+    tokens = (
+        TokenUsage(
             input_tokens=_as_token_count(payload.get("prompt_eval_count")),
             output_tokens=_as_token_count(payload.get("eval_count")),
-        ),
+            cache_write_tokens=0,
+            cache_read_tokens=0,
+        )
+        if reports_counts
+        else TokenUsage()
+    )
+    return GenerationUsage(
+        tokens=tokens,
         output_chars=len(text),
         output_words=len(text.split()),
         output_bytes=len(text.encode("utf-8")),

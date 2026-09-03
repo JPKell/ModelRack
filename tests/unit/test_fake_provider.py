@@ -423,6 +423,40 @@ class TestUsageAccounting:
         assert usage.tokens.input_tokens == 11
         assert usage.tokens.output_tokens == 13
 
+    def test_an_unscripted_cache_class_is_zero_rather_than_unsupported(self) -> None:
+        """ADR-0070 decision 5: the fake plays a protocol that bills no cache tier.
+
+        `0` here is the same statement the two real adapters make about their own wire formats —
+        nothing could have been billed under these headings — and it is what lets a consumer's
+        tests exercise a *totalled* cost against the fake at all, which was impossible while every
+        fake response reported two unavailable classes.
+        """
+        tokens = _provider().generate(_request(_identity())).usage.tokens
+
+        assert tokens.cache_read_tokens == 0
+        assert tokens.cache_write_tokens == 0
+        assert is_supported(tokens.total_tokens)
+
+    def test_unsupported_cache_classes_stay_scriptable(self) -> None:
+        """The escape hatch decision 5 requires the fake to keep once its default became `0`.
+
+        LoadLedger and PromptCadence both need a response whose cache classes were never reported
+        — the shape a real adapter produces from a response with no usage object — and a fake that
+        could only produce zeros would quietly stop them testing their own ``UNSUPPORTED``
+        branches.
+        """
+        script = FakeScript(
+            generations=(
+                FakeGeneration(cache_read_tokens=UNSUPPORTED, cache_write_tokens=UNSUPPORTED),
+            )
+        )
+
+        tokens = _provider(script).generate(_request(_identity())).usage.tokens
+
+        assert not is_supported(tokens.cache_read_tokens)
+        assert not is_supported(tokens.cache_write_tokens)
+        assert not is_supported(tokens.total_tokens)
+
     def test_cached_input_is_not_also_billed_as_input(self) -> None:
         """ADR-0030: the four billing classes are disjoint, and reconciling them is adapter work."""
         plain = _provider().generate(_request(_identity())).usage.tokens
@@ -449,6 +483,11 @@ class TestUsageAccounting:
         assert not is_supported(usage.tokens.output_tokens)
         assert not is_supported(usage.thinking_tokens)
         assert not is_supported(usage.tool_tokens)
+        # ADR-0070 does not reach here: a provider that declares it counts nothing has not told
+        # us that nothing was billed, only that it is not counting. This is the fake's analogue
+        # of a response with no usage object, and all four classes stay unavailable.
+        assert not is_supported(usage.tokens.cache_read_tokens)
+        assert not is_supported(usage.tokens.cache_write_tokens)
 
     def test_observations_survive_an_undeclared_counter(self) -> None:
         """Characters are not the provider's count — this process is holding the string."""

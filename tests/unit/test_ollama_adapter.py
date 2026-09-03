@@ -584,7 +584,51 @@ class TestGeneration:
 
         assert usage.tokens.input_tokens == 26
         assert usage.tokens.output_tokens == 42
-        assert not is_supported(usage.tokens.cache_read_tokens)
+
+    @respx.mock
+    def test_a_protocol_that_cannot_bill_a_cache_reports_zero_not_unsupported(
+        self, load_ollama_fixture: Callable[[str], Any]
+    ) -> None:
+        """ADR-0070 decision 3: Ollama has no cache-billing vocabulary, so `0` is a fact.
+
+        The consequence is the point — with both cache classes counted rather than unavailable,
+        `total_tokens` is a number and a price list without cache rates still totals, which is
+        what ADR-0069 could not do for any real response before this rule.
+        """
+        respx.post(f"{_BASE_URL}/api/chat").mock(
+            return_value=httpx.Response(200, json=load_ollama_fixture("chat_complete.json"))
+        )
+
+        tokens = _provider().generate(_request()).usage.tokens
+
+        assert tokens.cache_read_tokens == 0
+        assert tokens.cache_write_tokens == 0
+        assert tokens.total_tokens == 68
+
+    @respx.mock
+    def test_a_terminal_payload_with_no_counts_reports_every_class_unsupported(
+        self, load_ollama_fixture: Callable[[str], Any]
+    ) -> None:
+        """Ollama's analogue of a response with no `usage` object: nothing reported, nothing known.
+
+        The boundary the whole rule turns on. A payload that carries neither ``prompt_eval_count``
+        nor ``eval_count`` has told this adapter nothing, and answering `0` for the cache classes
+        here — where the counts are simply absent rather than unbillable — would be the fabricated
+        zero ADR-0016 forbids.
+        """
+        respx.post(f"{_BASE_URL}/api/chat").mock(
+            return_value=httpx.Response(
+                200, json=load_ollama_fixture("chat_complete_no_counts.json")
+            )
+        )
+
+        tokens = _provider().generate(_request()).usage.tokens
+
+        assert not is_supported(tokens.input_tokens)
+        assert not is_supported(tokens.output_tokens)
+        assert not is_supported(tokens.cache_read_tokens)
+        assert not is_supported(tokens.cache_write_tokens)
+        assert not is_supported(tokens.total_tokens)
 
     @respx.mock
     def test_generate_extracts_all_four_backend_durations(

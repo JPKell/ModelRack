@@ -458,8 +458,14 @@ class FakeGeneration:
             ``input_tokens`` so the four billing classes stay **disjoint**
             (ADR-0030) — reconciling a
             provider's overlapping figures is the adapter's job, and a fake that double-counted
-            them would let a consumer's cost arithmetic ship wrong.
-        cache_write_tokens: Tokens billed at the cache-creation rate.
+            them would let a consumer's cost arithmetic ship wrong. ``None`` reports ``0``: the
+            fake plays a protocol with no cache-billing vocabulary, and a class that could not
+            have been billed is zero rather than unavailable
+            (ADR-0070 decision 5). Pass
+            ``UNSUPPORTED`` to script the unreported shape instead — the one a consumer needs to
+            exercise the ``UNSUPPORTED`` branch of its own cost arithmetic.
+        cache_write_tokens: Tokens billed at the cache-creation rate. ``None`` reports ``0``, and
+            ``UNSUPPORTED`` is scriptable, for the same reasons.
         backend_timing: What the provider claims it spent. ``None`` reports every ``backend_*``
             field as ``UNSUPPORTED``, which is the honest default: the fake ran no model and has no
             account of work it did not do. Client timings are never taken from here — they are

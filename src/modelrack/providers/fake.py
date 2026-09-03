@@ -20,7 +20,10 @@ one is forbidden to do too:
   ([spec §11.10](../../../docs/packages/modelrack/spec.md)).
 * A measurement it does not have is ``UNSUPPORTED``, never ``0``
   (ADR-0016). With ``token_counts``
-  undeclared, every token count is absent — not a plausible-looking number.
+  undeclared, every token count is absent — not a plausible-looking number. The one class of
+  exception is the one ADR-0070 draws: the fake plays a protocol that bills no cache tier, so its
+  two cache classes report ``0`` — a count of what could not have been billed, not a guess at
+  what was — and a script that wants the unreported shape says ``UNSUPPORTED`` outright.
 * What it *observed* and what it *claims to have spent* stay in separate fields. Client timings
   come from the scripted delays because the fake really did simulate them; ``backend_*`` fields
   are ``UNSUPPORTED`` unless a script supplies them, because the fake ran no model and has no
@@ -1036,15 +1039,16 @@ class FakeProvider:
             )
         thinking_text = thinking if isinstance(thinking, str) else ""
         tool_text = "".join(argument_texts)
+        # ADR-0070 decision 5: the fake plays a protocol that bills no cache tier, so an
+        # unscripted cache class is `0` — the same statement the two real adapters make about
+        # their own wire formats — rather than UNSUPPORTED. `UNSUPPORTED` stays scriptable
+        # explicitly (`cache_read_tokens=UNSUPPORTED`), which is how a consumer's tests reach the
+        # no-usage-object shape on demand.
         cache_read: TokenCount = (
-            generation.cache_read_tokens
-            if generation.cache_read_tokens is not None
-            else UNSUPPORTED
+            generation.cache_read_tokens if generation.cache_read_tokens is not None else 0
         )
         cache_write: TokenCount = (
-            generation.cache_write_tokens
-            if generation.cache_write_tokens is not None
-            else UNSUPPORTED
+            generation.cache_write_tokens if generation.cache_write_tokens is not None else 0
         )
         if generation.input_tokens is not None:
             input_tokens: TokenCount = generation.input_tokens

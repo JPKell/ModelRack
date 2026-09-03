@@ -77,8 +77,10 @@ from baseaicore import (
     ModelDescriptor,
     ModelIdentity,
     ProviderKind,
+    TokenCount,
     TokenUsage,
     elapsed_ms,
+    is_supported,
     monotonic_ns,
     utc_now,
 )
@@ -1263,22 +1265,95 @@ def _as_token_count(value: object) -> Any:  # noqa: ANN401 — mirrors baseaicor
     return value
 
 
+def _reconcile_prompt_tokens(usage: Mapping[str, Any]) -> tuple[TokenCount, TokenCount]:
+    """Split the wire's prompt figure into the disjoint ``input`` and ``cache read`` classes.
+
+    ADR-0030 makes the adapter the only
+    layer that knows a provider's convention, and this protocol's convention is that
+    ``prompt_tokens`` is a *total* which already contains any cached tokens reported beside it in
+    ``prompt_tokens_details.cached_tokens``. Subtracting is therefore not an adjustment but the
+    translation into :class:`~baseaicore.TokenUsage`'s disjoint classes; without it a cached
+    prefix is billed twice, once at the input rate and once at the cache-read rate.
+
+    Args:
+        usage: A non-empty wire ``usage`` object.
+
+    Returns:
+        ``(input_tokens, cache_read_tokens)``, in three cases:
+
+        * **No ``prompt_tokens_details`` key.** The server does no cache accounting, so nothing
+          could have been billed as a cache read: the pair is ``(prompt_tokens, 0)``
+          (ADR-0070 decision 2).
+        * **A readable ``cached_tokens``** that does not exceed ``prompt_tokens``: the pair is
+          ``(prompt_tokens - cached_tokens, cached_tokens)``.
+        * **A details object that is present but unreadable** — not a mapping (``null``
+          included), no ``cached_tokens`` key, a malformed or negative figure, or a
+          ``cached_tokens`` larger than ``prompt_tokens``, which is a server contradicting itself
+          — the pair is ``(UNSUPPORTED, UNSUPPORTED)``.
+
+    The third case is where this function refuses rather than guesses, and it refuses on *both*
+    classes together because they are the two halves of one subtraction: a server that sent a
+    details object has told us it does cache accounting, so a cache-read ``0`` would be the
+    fabricated zero ADR-0016 forbids
+    rather than the honest one ADR-0070 licenses, and an ``input_tokens`` of ``prompt_tokens``
+    beside an unknown cached figure would not be disjoint from it. Clamping the subtraction at
+    zero instead — the shape :class:`~modelrack.testing.FakeProvider` uses for a *scripted*
+    count — is rejected here: it would turn a self-contradicting response into a confident
+    ``input_tokens`` of ``0`` for a call that certainly had input.
+    """
+    prompt_tokens = _as_token_count(usage.get("prompt_tokens"))
+    if "prompt_tokens_details" not in usage:
+        return prompt_tokens, 0
+    details = usage.get("prompt_tokens_details")
+    cached = (
+        _as_token_count(details.get("cached_tokens"))
+        if isinstance(details, Mapping)
+        else UNSUPPORTED
+    )
+    if not is_supported(cached) or not is_supported(prompt_tokens) or cached > prompt_tokens:
+        return UNSUPPORTED, UNSUPPORTED
+    return prompt_tokens - cached, cached
+
+
 def _read_usage(payload: Mapping[str, Any], *, text: str) -> GenerationUsage:
     """Build a :class:`~modelrack.types.GenerationUsage` from the wire ``usage`` object.
 
-    ``prompt_tokens``/``completion_tokens`` map to the billing vocabulary's disjoint classes; this
-    protocol reports no cache-aware billing, so both cache classes stay
-    :data:`~baseaicore.UNSUPPORTED` rather than an invented zero
-    (ADR-0016). Character, word and byte
-    counts are observations this process can make regardless of what the provider counted.
+    **What this protocol can bill.** ``prompt_tokens`` and ``completion_tokens`` are the input and
+    output classes. Cached input is expressible — ``usage.prompt_tokens_details.cached_tokens`` —
+    and is read here and reconciled by :func:`_reconcile_prompt_tokens`. A cache *write* is not
+    expressible anywhere in this protocol: there is no field by which a server following this wire
+    format could charge for one, so ``cache_write_tokens`` is ``0`` whenever a usage object is
+    present. That is a statement about the protocol, not about the response
+    (ADR-0070 decision 2). Its known
+    limit is recorded in that ADR's *Revisit when*: a provider that bills cache writes under this
+    shape without reporting them would make the zero wrong, and would need a per-provider
+    override rather than this protocol-level rule.
+
+    **Absent is not empty, and neither is zero.** A response with no usage object — the key
+    missing, ``null``, not a mapping, or an empty ``{}`` — reports every class ``UNSUPPORTED``,
+    the third of ADR-0070's three cases. The empty mapping belongs with the absent ones for a
+    concrete reason: :meth:`OpenAICompatibleProvider.stream` accumulates usage chunks into a dict
+    that stays ``{}`` when the stream carried none, and passes ``{"usage": usage_payload}`` here.
+    Folding that into "present but without cache detail" would report cache classes of ``0`` for
+    a stream that reported no usage at all — a fabricated zero produced by a default value.
+
+    Character, word and byte counts are observations this process can make regardless of what the
+    provider counted, so they are always present.
     """
-    usage = payload.get("usage")
-    usage = usage if isinstance(usage, Mapping) else {}
-    return GenerationUsage(
-        tokens=TokenUsage(
-            input_tokens=_as_token_count(usage.get("prompt_tokens")),
+    raw_usage = payload.get("usage")
+    usage = raw_usage if isinstance(raw_usage, Mapping) and raw_usage else None
+    if usage is None:
+        tokens = TokenUsage()
+    else:
+        input_tokens, cache_read_tokens = _reconcile_prompt_tokens(usage)
+        tokens = TokenUsage(
+            input_tokens=input_tokens,
             output_tokens=_as_token_count(usage.get("completion_tokens")),
-        ),
+            cache_write_tokens=0,
+            cache_read_tokens=cache_read_tokens,
+        )
+    return GenerationUsage(
+        tokens=tokens,
         output_chars=len(text),
         output_words=len(text.split()),
         output_bytes=len(text.encode("utf-8")),

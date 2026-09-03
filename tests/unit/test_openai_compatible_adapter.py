@@ -410,6 +410,116 @@ class TestGeneration:
         assert usage.tokens.output_tokens == 15
 
     @respx.mock
+    def test_a_usage_object_without_cache_detail_reports_cache_classes_as_zero(
+        self, load_openai_compatible_fixture: Callable[[str], Any]
+    ) -> None:
+        """No details object means the server does no cache accounting (ADR-0070 decision 2).
+
+        Both classes are `0` for different reasons worth keeping straight: cache *read* because
+        this server would have reported it had it billed any, and cache *write* because this
+        protocol has no field for one at all.
+        """
+        respx.post(f"{_BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json=load_openai_compatible_fixture("chat_complete.json")
+            )
+        )
+
+        tokens = _provider().generate(_request()).usage.tokens
+
+        assert tokens.cache_read_tokens == 0
+        assert tokens.cache_write_tokens == 0
+        assert tokens.total_tokens == 36
+
+    @respx.mock
+    def test_cached_input_is_reconciled_out_of_the_input_class(
+        self, load_openai_compatible_fixture: Callable[[str], Any]
+    ) -> None:
+        """The subtraction ADR-0030 assigns to the adapter, on the shape that needs it.
+
+        ``prompt_tokens`` 21 already contains the 8 cached tokens reported beside it, so input is
+        13. An adapter that passed ``prompt_tokens`` straight through would bill those 8 tokens
+        twice — at the full input rate and again at the cache-read rate.
+        """
+        respx.post(f"{_BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json=load_openai_compatible_fixture("chat_complete_cached.json")
+            )
+        )
+
+        tokens = _provider().generate(_request()).usage.tokens
+
+        assert tokens.cache_read_tokens == 8
+        assert tokens.input_tokens == 13
+        assert tokens.input_tokens + tokens.cache_read_tokens == 21
+        assert tokens.cache_write_tokens == 0
+
+    @respx.mock
+    def test_a_response_with_no_usage_object_reports_every_class_unsupported(
+        self, load_openai_compatible_fixture: Callable[[str], Any]
+    ) -> None:
+        """Nothing reported is not zero reported — ADR-0070's third case."""
+        respx.post(f"{_BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(
+                200, json=load_openai_compatible_fixture("chat_complete_no_usage.json")
+            )
+        )
+
+        tokens = _provider().generate(_request()).usage.tokens
+
+        assert not is_supported(tokens.input_tokens)
+        assert not is_supported(tokens.output_tokens)
+        assert not is_supported(tokens.cache_read_tokens)
+        assert not is_supported(tokens.cache_write_tokens)
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        ("label", "details"),
+        [
+            ("not a mapping", "not-an-object"),
+            ("explicit null", None),
+            ("no cached_tokens key", {"audio_tokens": 4}),
+            ("a fractional figure", {"cached_tokens": 1.5}),
+            ("a negative figure", {"cached_tokens": -1}),
+            ("a numeric string", {"cached_tokens": "8"}),
+            ("more cached than prompt", {"cached_tokens": 22}),
+        ],
+    )
+    def test_an_unreadable_details_object_refuses_rather_than_reporting_zero(
+        self, label: str, details: Any
+    ) -> None:
+        """A details object this adapter cannot read leaves *both* halves of the pair unknown.
+
+        The one case where a confident `0` would be the fabricated zero rather than the honest
+        one: the server sent a details object, so it does cache accounting, so an unreadable
+        figure means a class that may well have been billed was not reported. Reporting the pair
+        as ``UNSUPPORTED`` is ADR-0070 decision 1's second sentence; reporting cache read as `0`
+        would be its first, misapplied. ``input_tokens`` goes with it because the two are the
+        halves of one subtraction — ``prompt_tokens`` beside an unknown cached figure is not
+        disjoint from it — and because clamping instead would report `0` input for a call that
+        certainly had some.
+        """
+        payload = {
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 21,
+                "completion_tokens": 15,
+                "prompt_tokens_details": details,
+            },
+        }
+        respx.post(f"{_BASE_URL}/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json=payload)
+        )
+
+        tokens = _provider().generate(_request()).usage.tokens
+
+        assert not is_supported(tokens.input_tokens), label
+        assert not is_supported(tokens.cache_read_tokens), label
+        # The classes the unreadable details object says nothing about are unaffected.
+        assert tokens.output_tokens == 15
+        assert tokens.cache_write_tokens == 0
+
+    @respx.mock
     def test_generate_reports_no_first_token_moment_or_backend_timing(
         self, load_openai_compatible_fixture: Callable[[str], Any]
     ) -> None:
@@ -616,6 +726,51 @@ class TestStreaming:
         assert "".join(d.text for d in _text_deltas(events)) == terminal.result.text
         assert terminal.result.finish_reason is FinishReason.STOP
         assert terminal.result.usage.tokens.output_tokens == 4
+
+    @respx.mock
+    def test_a_stream_that_carried_a_usage_chunk_reports_cache_classes_as_zero(
+        self, load_openai_compatible_fixture: Callable[[str], Any]
+    ) -> None:
+        """The streamed path reaches the same three cases as the non-streaming one."""
+        respx.post(f"{_BASE_URL}/v1/chat/completions").mock(
+            return_value=_sse_response(load_openai_compatible_fixture("chat_stream.sse"))
+        )
+
+        terminal = list(_provider().stream(_request()))[-1]
+
+        assert isinstance(terminal, StreamCompleted)
+        tokens = terminal.result.usage.tokens
+        assert tokens.input_tokens == 21
+        assert tokens.cache_read_tokens == 0
+        assert tokens.cache_write_tokens == 0
+        assert tokens.total_tokens == 25
+
+    @respx.mock
+    def test_a_stream_that_carried_no_usage_chunk_reports_every_class_unsupported(
+        self, load_openai_compatible_fixture: Callable[[str], Any]
+    ) -> None:
+        """The default-value trap, asserted where it would have been sprung.
+
+        A stream that never carried a usage chunk arrives at ``_read_usage`` as
+        ``{"usage": {}}`` — an *empty* mapping produced by this adapter's own accumulator, not by
+        the server. Reading that as "a usage object without cache detail" would report cache
+        classes of `0` for a response that reported no usage at all, which is a fabricated zero
+        manufactured out of a default value rather than out of anything the server said.
+        """
+        respx.post(f"{_BASE_URL}/v1/chat/completions").mock(
+            return_value=_sse_response(
+                load_openai_compatible_fixture("chat_stream_no_finish_reason.sse")
+            )
+        )
+
+        terminal = list(_provider().stream(_request()))[-1]
+
+        assert isinstance(terminal, StreamCompleted)
+        tokens = terminal.result.usage.tokens
+        assert not is_supported(tokens.input_tokens)
+        assert not is_supported(tokens.output_tokens)
+        assert not is_supported(tokens.cache_read_tokens)
+        assert not is_supported(tokens.cache_write_tokens)
 
     @respx.mock
     def test_a_stream_reports_the_first_token_moment_it_observed(
