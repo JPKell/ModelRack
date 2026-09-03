@@ -23,13 +23,27 @@ consequences.
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 import respx
-from baseaicore import IdentityConfidence, RuntimeProfile, is_supported
+from baseaicore import (
+    UNSUPPORTED,
+    IdentityConfidence,
+    ModelIdentity,
+    ModelPricing,
+    Money,
+    PricingSource,
+    ProviderKind,
+    RuntimeProfile,
+    TokenRates,
+    estimate_cost,
+    is_supported,
+)
 
 from modelrack import (
     CapabilityUnsupported,
@@ -64,7 +78,7 @@ from modelrack.testing import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
-    from baseaicore import ModelIdentity
+    from baseaicore import TokenUsage
 
     from modelrack import ProviderCapabilities, StreamEvent
 
@@ -87,6 +101,94 @@ _ANSWER_SCHEMA = {
     "properties": {"answer": {"type": "string"}},
     "required": ["answer"],
 }
+
+
+class UsageShape(enum.Enum):
+    """The three response shapes ADR-0070 makes every adapter account for.
+
+    Named rather than positional because a subclass declares them by name (see
+    :class:`UsageShapes`), and a fourth adapter reading this file should not have to work out
+    which element of a tuple meant what.
+    """
+
+    NO_CACHE_DETAIL = "no_cache_detail"
+    """A usage report from a server that does no cache accounting: both cache classes are `0`."""
+
+    CACHE_DETAIL = "cache_detail"
+    """A usage report carrying cached input, reconciled into the disjoint classes."""
+
+    NO_USAGE_OBJECT = "no_usage_object"
+    """A response reporting no counts at all: every class is `UNSUPPORTED`."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class CacheDetailShape:
+    """What one adapter's :attr:`UsageShape.CACHE_DETAIL` response claims, in wire terms.
+
+    The suite asserts the *reconciliation arithmetic* — that the disjoint classes sum back to the
+    provider's own prompt figure — and it cannot read that figure off the result, because the
+    result is exactly what the reconciliation has already rewritten. So the adapter declares it.
+
+    Attributes:
+        prompt_tokens: The provider's own prompt figure, the total that includes the cached
+            tokens. ``input_tokens + cache_read_tokens`` must equal it.
+        cached_tokens: The cached portion the provider reported inside that total.
+    """
+
+    prompt_tokens: int
+    cached_tokens: int
+
+    def __post_init__(self) -> None:
+        """Raise if the declaration is not one a real response could carry."""
+        if not 0 <= self.cached_tokens <= self.prompt_tokens:
+            raise ValueError(
+                "CacheDetailShape declares cached_tokens outside 0..prompt_tokens; a response "
+                "shaped like that is the adapter's refusal case, not its reconciliation case."
+            )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class UsageShapes:
+    """How one adapter is driven into each of ADR-0070's three response shapes.
+
+    **This is the seam a new adapter binds to.** Row D3 adds ``LlamaCppProvider`` to this suite by
+    writing one ``usage_shapes`` fixture — declaring which recorded response produces each shape,
+    and what its cache-detail response claims — and changes nothing in the three behaviours below.
+    That is the whole reason the usage rule lands before the third adapter rather than after it.
+
+    Attributes:
+        provider_for: Returns a provider whose next ``generate`` produces the named shape. For a
+            recorded adapter this selects which fixture the transport serves and returns the same
+            provider; for :class:`~modelrack.testing.FakeProvider` it returns a freshly scripted
+            one. Either is fine — the suite only ever calls ``generate`` on what it is handed.
+        cache_detail: What the ``CACHE_DETAIL`` response claims, or ``None`` when the adapter's
+            wire protocol has **no way to report cached input at all**. ``None`` is a declaration,
+            not a skip: Ollama's protocol has no cache-billing vocabulary, which is precisely why
+            its cache classes are `0` rather than reconciled, and an adapter that could report
+            cache detail but declared ``None`` here would be exempting itself from the one case
+            that catches double-billed cached input.
+    """
+
+    provider_for: Callable[[UsageShape], Provider]
+    cache_detail: CacheDetailShape | None
+
+
+# A price list with input and output rates and no cache rates — the local-model case, and the case
+# of a published list that predates a provider's cache pricing. It is the whole point of ADR-0070
+# that this list can total a real response: `estimate_cost` refuses a component whose count is
+# UNSUPPORTED, but a count of exactly `0` costs exactly nothing whether or not a rate exists for
+# it, so cache classes reported as `0` leave the total priced instead of turning it into a floor.
+_PRICED_AT = datetime(2026, 8, 22, 14, 0, tzinfo=UTC)
+_UNCACHED_PRICING = ModelPricing(
+    identity=ModelIdentity(ProviderKind.OPENAI_COMPATIBLE, "conformance-priced-model"),
+    rates=TokenRates(
+        currency="USD",
+        input_per_million_tokens=Money.from_decimal("USD", "3.00"),
+        output_per_million_tokens=Money.from_decimal("USD", "15.00"),
+    ),
+    source=PricingSource.PROVIDER_PUBLISHED,
+    observed_at=datetime(2026, 8, 1, tzinfo=UTC),
+)
 
 
 def _deltas(events: Sequence[StreamEvent]) -> list[TokenDelta]:
@@ -256,6 +358,123 @@ class ProviderConformanceSuite:
         else:
             assert not is_supported(usage.tokens.output_tokens)
             assert not is_supported(usage.tokens.input_tokens)
+
+    # ------------------------------------------------------------------- usage shapes (ADR-0070)
+
+    @pytest.fixture
+    def usage_shapes(self) -> UsageShapes | None:
+        """Declare how this adapter reaches each of ADR-0070's three response shapes.
+
+        Overridden by every subclass — including one that returns ``None``, which declares that
+        this configuration reports no token counts at all and sends the three behaviours below to
+        their refusal branch instead. There is no default: an adapter added to this suite must say
+        which shapes its protocol produces, because "it was never asked" and "it answered `0`" are
+        exactly the two things ADR-0070 exists to keep apart.
+        """
+        raise NotImplementedError
+
+    def _tokens_for(self, provider: Provider, known_reference: str) -> TokenUsage:
+        """Return the billing classes one generation from ``provider`` reported."""
+        return provider.generate(self.request(provider.resolve(known_reference))).usage.tokens
+
+    def _assert_reports_no_counts_at_all(
+        self, provider: Provider, known_reference: str, capabilities: ProviderCapabilities
+    ) -> None:
+        """Assert the shape a provider that declares no token counting must report.
+
+        The refusal branch of the three behaviours below, kept as an assertion rather than a skip:
+        a provider that counts nothing still has to report *nothing* — four ``UNSUPPORTED``
+        classes — rather than the plausible-looking zeros ADR-0016 forbids.
+        """
+        assert not capabilities.token_counts
+        tokens = self._tokens_for(provider, known_reference)
+        assert not is_supported(tokens.input_tokens)
+        assert not is_supported(tokens.output_tokens)
+        assert not is_supported(tokens.cache_read_tokens)
+        assert not is_supported(tokens.cache_write_tokens)
+
+    def test_a_response_without_cache_detail_bills_no_cache_and_still_totals(
+        self,
+        usage_shapes: UsageShapes | None,
+        provider: Provider,
+        known_reference: str,
+        capabilities: ProviderCapabilities,
+    ) -> None:
+        """A class the protocol could not have billed is `0`, and `0` is a number that totals.
+
+        The observable improvement ADR-0070 exists for, asserted where it can be seen rather than
+        only described in a changelog: with the cache classes reported as `0`, ``total_tokens``
+        returns a number and a price list carrying no cache rates still produces a **total** for
+        a real response instead of the floor ADR-0069 would otherwise have to label it.
+        """
+        if usage_shapes is None:
+            self._assert_reports_no_counts_at_all(provider, known_reference, capabilities)
+            return
+        shaped = usage_shapes.provider_for(UsageShape.NO_CACHE_DETAIL)
+        tokens = self._tokens_for(shaped, known_reference)
+
+        assert tokens.cache_read_tokens == 0
+        assert tokens.cache_write_tokens == 0
+        assert is_supported(tokens.total_tokens)
+        estimate = estimate_cost(tokens, _UNCACHED_PRICING, at=_PRICED_AT)
+        assert is_supported(estimate.total)
+        assert estimate.unpriced_reasons == ()
+
+    def test_a_response_with_cache_detail_reports_disjoint_classes(
+        self,
+        usage_shapes: UsageShapes | None,
+        provider: Provider,
+        known_reference: str,
+        capabilities: ProviderCapabilities,
+    ) -> None:
+        """Cached input is reconciled out of the input class, never billed twice.
+
+        The arithmetic is the assertion: ``input_tokens + cache_read_tokens`` must come back to
+        the provider's own prompt figure. An adapter that simply copied ``prompt_tokens`` into
+        ``input_tokens`` and reported the cached figure beside it would pass a type check and
+        over-bill every cached call at the full input rate — the latent defect ADR-0070 names.
+        """
+        if usage_shapes is None:
+            self._assert_reports_no_counts_at_all(provider, known_reference, capabilities)
+            return
+        declared = usage_shapes.cache_detail
+        if declared is None:
+            pytest.skip(
+                "declared: this wire protocol cannot report cached input at all, so the "
+                "no-cache-detail behaviour above is the only shape it has"
+            )
+        shaped = usage_shapes.provider_for(UsageShape.CACHE_DETAIL)
+        tokens = self._tokens_for(shaped, known_reference)
+
+        assert tokens.cache_read_tokens == declared.cached_tokens
+        assert tokens.input_tokens == declared.prompt_tokens - declared.cached_tokens
+        assert tokens.input_tokens + tokens.cache_read_tokens == declared.prompt_tokens
+        assert tokens.cache_write_tokens == 0
+
+    def test_a_response_with_no_usage_object_reports_every_class_unsupported(
+        self,
+        usage_shapes: UsageShapes | None,
+        provider: Provider,
+        known_reference: str,
+        capabilities: ProviderCapabilities,
+    ) -> None:
+        """Nothing reported is not zero reported — the boundary the whole rule turns on.
+
+        This is the case a fabricated zero would hide in: an adapter that answered `0` here would
+        report a free call for a response that told it nothing, and every consumer downstream
+        would total it without a murmur.
+        """
+        if usage_shapes is None:
+            self._assert_reports_no_counts_at_all(provider, known_reference, capabilities)
+            return
+        shaped = usage_shapes.provider_for(UsageShape.NO_USAGE_OBJECT)
+        tokens = self._tokens_for(shaped, known_reference)
+
+        assert not is_supported(tokens.input_tokens)
+        assert not is_supported(tokens.output_tokens)
+        assert not is_supported(tokens.cache_read_tokens)
+        assert not is_supported(tokens.cache_write_tokens)
+        assert not is_supported(tokens.total_tokens)
 
     def test_caller_metadata_never_reaches_the_provider_payload(
         self, provider: Provider, identity: ModelIdentity
@@ -536,6 +755,41 @@ class ProviderConformanceSuite:
         assert raised.value.code != "INTERNAL_ERROR"
 
 
+def _fake_usage_shapes() -> UsageShapes:
+    """Declare the three ADR-0070 shapes for :class:`~modelrack.testing.FakeProvider`.
+
+    Shared by every fake-backed class below that declares ``token_counts``: the shapes are a
+    property of the fake's scripting surface, not of the chunking or capability variations those
+    classes exist to vary. Each shape is a freshly scripted provider rather than a mutated one,
+    which is what :class:`FakeScript` makes cheap and a recorded transport does not.
+
+    ``NO_USAGE_OBJECT`` is scripted by naming ``UNSUPPORTED`` on all four classes — the escape
+    hatch ADR-0070 decision 5 requires the fake to keep once its unscripted cache classes became
+    `0`, and the shape LoadLedger's and PromptCadence's own tests need on demand.
+    """
+
+    def provider_for(shape: UsageShape) -> Provider:
+        if shape is UsageShape.CACHE_DETAIL:
+            # 13 + 8 = 21, the same prompt figure the recorded OpenAI-compatible fixture claims,
+            # so the two adapters are asserted against arithmetic of the same shape.
+            generation = FakeGeneration(input_tokens=13, cache_read_tokens=8)
+        elif shape is UsageShape.NO_USAGE_OBJECT:
+            generation = FakeGeneration(
+                input_tokens=UNSUPPORTED,
+                output_tokens=UNSUPPORTED,
+                cache_read_tokens=UNSUPPORTED,
+                cache_write_tokens=UNSUPPORTED,
+            )
+        else:
+            generation = FakeGeneration()
+        return FakeProvider(FakeScript(generations=(generation,)), seed=17)
+
+    return UsageShapes(
+        provider_for=provider_for,
+        cache_detail=CacheDetailShape(prompt_tokens=21, cached_tokens=8),
+    )
+
+
 class TestFakeProviderConformance(ProviderConformanceSuite):
     """The fake with everything it can do declared — the capable path through the suite."""
 
@@ -546,6 +800,10 @@ class TestFakeProviderConformance(ProviderConformanceSuite):
     @pytest.fixture
     def known_reference(self) -> str:
         return "fake-model:8b-q8_0"
+
+    @pytest.fixture
+    def usage_shapes(self) -> UsageShapes | None:
+        return _fake_usage_shapes()
 
 
 class TestFakeProviderMinimalConformance(ProviderConformanceSuite):
@@ -570,6 +828,16 @@ class TestFakeProviderMinimalConformance(ProviderConformanceSuite):
     @pytest.fixture
     def known_reference(self) -> str:
         return "fake-model:8b-q8_0"
+
+    @pytest.fixture
+    def usage_shapes(self) -> UsageShapes | None:
+        """``None``: this configuration declares no token counting, so it has no usage shapes.
+
+        Not an exemption — the three behaviours take their refusal branch and assert that all
+        four classes come back ``UNSUPPORTED``, which is the same undeclared-counter path
+        ``test_token_counts_follow_the_declaration`` covers for the two classes it checks.
+        """
+        return None
 
 
 class TestFakeProviderChunkedConformance(ProviderConformanceSuite):
@@ -596,6 +864,10 @@ class TestFakeProviderChunkedConformance(ProviderConformanceSuite):
     def known_reference(self) -> str:
         return "fake-model:8b-q8_0"
 
+    @pytest.fixture
+    def usage_shapes(self) -> UsageShapes | None:
+        return _fake_usage_shapes()
+
 
 class TestOllamaProviderConformance(ProviderConformanceSuite):
     """The same suite against :class:`~modelrack.providers.ollama.OllamaProvider`, over a
@@ -611,7 +883,19 @@ class TestOllamaProviderConformance(ProviderConformanceSuite):
     """
 
     @pytest.fixture
-    def provider(self, load_ollama_fixture: Callable[[str], Any]) -> Iterator[Provider]:
+    def selected_chat_fixture(self) -> dict[str, str]:
+        """The recorded ``/api/chat`` body the transport serves next, by filename.
+
+        Mutable and shared with :func:`usage_shapes`, which is how one provider is driven into
+        more than one response shape without rebuilding its transport. The default is the payload
+        every other behaviour in the suite has always been asserted against.
+        """
+        return {"complete": "chat_complete.json"}
+
+    @pytest.fixture
+    def provider(
+        self, load_ollama_fixture: Callable[[str], Any], selected_chat_fixture: dict[str, str]
+    ) -> Iterator[Provider]:
         resident = {"is_resident": False}
 
         def show_handler(request: httpx.Request) -> httpx.Response:
@@ -640,7 +924,7 @@ class TestOllamaProviderConformance(ProviderConformanceSuite):
                     content=load_ollama_fixture("chat_stream.ndjson"),
                     headers={"Content-Type": "application/x-ndjson"},
                 )
-            return httpx.Response(200, json=load_ollama_fixture("chat_complete.json"))
+            return httpx.Response(200, json=load_ollama_fixture(selected_chat_fixture["complete"]))
 
         with respx.mock(assert_all_called=False) as mock:
             mock.get("http://ollama.conformance.test/api/version").mock(
@@ -661,6 +945,30 @@ class TestOllamaProviderConformance(ProviderConformanceSuite):
     def known_reference(self) -> str:
         return "qwen3.5:9b-q8_0"
 
+    @pytest.fixture
+    def usage_shapes(
+        self, provider: Provider, selected_chat_fixture: dict[str, str]
+    ) -> UsageShapes | None:
+        """Two shapes, and a declared absence of the third.
+
+        ``cache_detail`` is ``None`` because Ollama's protocol has no cache-billing vocabulary at
+        all — there is no field by which a response could report cached input, which is exactly
+        why :func:`~modelrack.providers._ollama_wire.read_usage` reports both cache classes as
+        `0` rather than reconciling anything (ADR-0070 decision 3). ``NO_USAGE_OBJECT`` is a
+        terminal payload carrying neither ``prompt_eval_count`` nor ``eval_count``, this
+        protocol's analogue of an absent ``usage`` object.
+        """
+        names = {
+            UsageShape.NO_CACHE_DETAIL: "chat_complete.json",
+            UsageShape.NO_USAGE_OBJECT: "chat_complete_no_counts.json",
+        }
+
+        def provider_for(shape: UsageShape) -> Provider:
+            selected_chat_fixture["complete"] = names[shape]
+            return provider
+
+        return UsageShapes(provider_for=provider_for, cache_detail=None)
+
 
 class TestOpenAICompatibleProviderConformance(ProviderConformanceSuite):
     """The same suite against
@@ -675,7 +983,16 @@ class TestOpenAICompatibleProviderConformance(ProviderConformanceSuite):
     """
 
     @pytest.fixture
-    def provider(self, load_openai_compatible_fixture: Callable[[str], Any]) -> Iterator[Provider]:
+    def selected_chat_fixture(self) -> dict[str, str]:
+        """The recorded ``/v1/chat/completions`` body the transport serves next, by filename."""
+        return {"complete": "chat_complete.json"}
+
+    @pytest.fixture
+    def provider(
+        self,
+        load_openai_compatible_fixture: Callable[[str], Any],
+        selected_chat_fixture: dict[str, str],
+    ) -> Iterator[Provider]:
         def chat_handler(request: httpx.Request) -> httpx.Response:
             body = json.loads(request.content)
             if body.get("stream"):
@@ -684,7 +1001,9 @@ class TestOpenAICompatibleProviderConformance(ProviderConformanceSuite):
                     content=load_openai_compatible_fixture("chat_stream.sse").encode("utf-8"),
                     headers={"Content-Type": "text/event-stream"},
                 )
-            return httpx.Response(200, json=load_openai_compatible_fixture("chat_complete.json"))
+            return httpx.Response(
+                200, json=load_openai_compatible_fixture(selected_chat_fixture["complete"])
+            )
 
         with respx.mock(assert_all_called=False) as mock:
             mock.get("http://openai-compatible.conformance.test/v1/models").mock(
@@ -698,3 +1017,29 @@ class TestOpenAICompatibleProviderConformance(ProviderConformanceSuite):
     @pytest.fixture
     def known_reference(self) -> str:
         return "qwen3.5-9b-instruct-q8_0"
+
+    @pytest.fixture
+    def usage_shapes(
+        self, provider: Provider, selected_chat_fixture: dict[str, str]
+    ) -> UsageShapes | None:
+        """All three shapes: this is the protocol that can express cached input.
+
+        ``chat_complete_cached.json`` reports ``prompt_tokens`` 21 with
+        ``prompt_tokens_details.cached_tokens`` 8, so a correct adapter reports input 13 and
+        cache read 8 — and an adapter that skipped the reconciliation would report input 21 and
+        bill the cached prefix twice.
+        """
+        names = {
+            UsageShape.NO_CACHE_DETAIL: "chat_complete.json",
+            UsageShape.CACHE_DETAIL: "chat_complete_cached.json",
+            UsageShape.NO_USAGE_OBJECT: "chat_complete_no_usage.json",
+        }
+
+        def provider_for(shape: UsageShape) -> Provider:
+            selected_chat_fixture["complete"] = names[shape]
+            return provider
+
+        return UsageShapes(
+            provider_for=provider_for,
+            cache_detail=CacheDetailShape(prompt_tokens=21, cached_tokens=8),
+        )
