@@ -7,6 +7,57 @@ packaging and release standards §3.
 
 ## [Unreleased]
 
+### Changed
+- **The reported shape of token usage changes for both real adapters.** A token class the wire
+  protocol has no way to bill is now reported as `0` rather than `UNSUPPORTED`; a class the
+  protocol can express but a response did not carry stays `UNSUPPORTED`; a response with no usage
+  object at all still reports every class `UNSUPPORTED`. The rule is per response, not per adapter
+  (ADR-0070). ADR-0016 is applied rather than reversed — this draws the line between "nothing
+  could have been billed here" and "something may have been billed and was not reported", and only
+  the first is a zero.
+
+  The visible consequence is that `total_tokens` starts returning a number for real responses and
+  `estimate_cost` starts producing a **total** where it previously refused: a price list with no
+  cache rates can now cost an Ollama or plain OpenAI-compatible response completely, because a
+  class counted as `0` costs nothing whether or not a rate exists for it. Under ADR-0069 every
+  such response was labelled a floor, `unmetered_debit_count` was never zero, and a strict money
+  ceiling tripped on the first remote response.
+
+  - `OllamaProvider`: both cache classes `0` — the protocol has no cache-billing vocabulary. A
+    terminal payload carrying neither `prompt_eval_count` nor `eval_count` is this protocol's
+    analogue of an absent usage object and reports all four classes `UNSUPPORTED`.
+  - `OpenAICompatibleProvider`: `usage.prompt_tokens_details.cached_tokens` is now **read**.
+    Where present, cache read is that figure and input is `prompt_tokens` minus it — the
+    disjointness reconciliation ADR-0030 assigns to the adapter. This also fixes a latent
+    over-estimate: against a server that reports cached tokens, cached input was previously
+    counted inside `prompt_tokens` and estimated at the full input rate. Where the details object
+    is absent, both cache classes are `0`; where it is present but unreadable, input and cache
+    read are both `UNSUPPORTED` rather than a guess. Cache write is `0` whenever a usage object is
+    present, because the protocol defines no write charge.
+  - `FakeProvider`: `FakeGeneration.cache_read_tokens` and `cache_write_tokens` now default to
+    `0` instead of `UNSUPPORTED`. **Any consumer test that relied on the fake's cache classes
+    defaulting to `UNSUPPORTED` must now script it explicitly** — pass `UNSUPPORTED` to either
+    field. With `capabilities.token_counts` undeclared, every class is still `UNSUPPORTED`.
+
+### Added
+- Three usage cases in the provider conformance suite, one per response shape, bound to each
+  adapter through a `usage_shapes` declaration rather than through adapter-specific tests — so a
+  new adapter declares which recorded responses produce which shapes and inherits the behaviours
+  (ADR-0070 decision 6, and spec §18).
+- Recorded fixtures for the new shapes: `openai_compatible/chat_complete_cached.json`,
+  `openai_compatible/chat_complete_no_usage.json` and `ollama/chat_complete_no_counts.json`. Both
+  fixture manifests record this as a re-annotation rather than a re-capture (spec §19): no
+  existing payload changed and neither provider version moved.
+
+### Documentation
+- `_ollama_wire.read_usage` now states what `prompt_eval_count` counts, verified live rather than
+  asserted: measured against Ollama 0.32.13, two back-to-back `/api/chat` requests sharing a
+  ~5 400-token prefix both reported `prompt_eval_count` 5410 while `prompt_eval_duration` fell
+  from 885 ms to 126 ms. The KV cache served the prefix and the count did not move, so the field
+  reports the prompt submitted, not the tokens evaluated — `input_tokens` for this adapter is the
+  prompt length, and a token brake reading it brakes on prompt size rather than on work done.
+  This settles the verification ADR-0070 decision 3 required before the rule could be asserted.
+
 ## [0.6.0] — 2026-08-31
 
 One field: the served context a provider actually reports. ADR-0023 §4 distinguishes a *reported*
