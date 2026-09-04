@@ -69,6 +69,26 @@ class ProviderUnavailableReason(StrEnum):
     NETWORK_ERROR = "network_error"
     """Reachability failed for a reason the adapter could not classify further."""
 
+    LAUNCH_FAILED = "launch_failed"
+    """A provider this package supervises could not be started at all.
+
+    The binary is missing or not executable, or no port in the configured range was free.
+    Nothing ran, so there is no exit code and no captured output — ``details`` names what was
+    attempted instead (ADR-0062).
+    """
+
+    PROCESS_EXITED = "process_exited"
+    """A provider this package supervises started and then exited.
+
+    Either during startup, before it ever answered a health probe, or later, between two calls.
+    ``details`` carries ``exit_code`` and ``stderr_tail`` — the captured end of the process's own
+    output — because "it did not start" with no diagnosis is the failure the adapter roadmap
+    names as the third supervision risk (ADR-0062).
+    """
+
+    NOT_READY = "not_ready"
+    """The provider answered, but said it is still loading and cannot serve yet."""
+
 
 class ProviderError(SuiteError):
     """Base for every failure that originates with a provider or the transport reaching it.
