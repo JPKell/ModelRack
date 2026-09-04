@@ -39,7 +39,9 @@ from modelrack import (
     Message,
     ProviderStatus,
     Role,
+    SamplingParameters,
     StreamCompleted,
+    ThinkingDelta,
     TokenDelta,
 )
 from modelrack.providers._gguf import read_gguf_header, sha256_of_file
@@ -56,6 +58,10 @@ _MODELS = os.environ.get("MODELRACK_LLAMACPP_MODELS")
 _SERVER = os.environ.get("MODELRACK_LLAMACPP_SERVER", "llama-server")
 _REQUIRE = os.environ.get("MODELRACK_REQUIRE_LLAMACPP") == "1"
 _LIVE_PROMPT = "Name one thing a KV cache stores."
+# A thinking model given no output cap spends its whole context on reasoning_content and answers
+# nothing — observed on the reference machine with Qwen3.5 9B at context 4096: 57 s of decoding,
+# an empty `text`. The cap keeps the journey short; the assertions accept reasoning as output.
+_OUTPUT_CAP = SamplingParameters(max_output_tokens=256)
 
 
 def _skip_or_fail(reason: str) -> None:
@@ -198,11 +204,21 @@ class TestRealServer:
             identity=identity,
             messages=(Message(role=Role.USER, content=_LIVE_PROMPT),),
             runtime_profile=profile,
+            sampling=_OUTPUT_CAP,
         )
         result = provider.generate(request)
-        assert result.text.strip()
+        thinking = result.thinking if isinstance(result.thinking, str) else ""
+        assert result.text.strip() or thinking.strip(), "neither an answer nor reasoning"
         assert result.finish_reason in {FinishReason.STOP, FinishReason.LENGTH}
         tokens = result.usage.tokens
+        print(  # noqa: T201 — the measurements are this test's output
+            f"\nload_ms={loaded.load_ms:.0f} build={provider.health().provider_version} "
+            f"finish={result.finish_reason.value} text_chars={len(result.text)} "
+            f"thinking_chars={len(thinking)} tokens=in {tokens.input_tokens} out "
+            f"{tokens.output_tokens} cache_read {tokens.cache_read_tokens} "
+            f"prompt_ms={result.timing.backend_prompt_eval_ms} "
+            f"decode_ms={result.timing.backend_decode_ms}"
+        )
         assert is_supported(tokens.input_tokens) and tokens.input_tokens > 0
         assert is_supported(tokens.output_tokens) and tokens.output_tokens > 0
         assert is_supported(tokens.cache_read_tokens) and tokens.cache_read_tokens >= 0
@@ -212,14 +228,25 @@ class TestRealServer:
 
         events = list(provider.stream(request))
         assert isinstance(events[-1], StreamCompleted)
-        assert any(isinstance(event, TokenDelta) for event in events)
+        assert any(isinstance(event, TokenDelta | ThinkingDelta) for event in events)
         assert events[-1].result.text == "".join(
             event.text for event in events if isinstance(event, TokenDelta)
         )
-        assert is_supported(events[-1].result.usage.tokens.output_tokens)
+        streamed = events[-1].result.usage.tokens
+        assert is_supported(streamed.output_tokens)
+        print(  # noqa: T201
+            f"stream: {len(events) - 1} deltas, cache_read {streamed.cache_read_tokens} "
+            f"(second request with a shared prefix), "
+            f"ttft_ms={events[-1].result.timing.client_ttft_ms:.0f}"
+        )
 
         native = provider.generate(
-            GenerationRequest(identity=identity, prompt=_LIVE_PROMPT, runtime_profile=profile)
+            GenerationRequest(
+                identity=identity,
+                prompt=_LIVE_PROMPT,
+                runtime_profile=profile,
+                sampling=SamplingParameters(max_output_tokens=64),
+            )
         )
         assert native.text.strip()
         assert is_supported(native.usage.tokens.input_tokens)
