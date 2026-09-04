@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
     from baseaicore import ModelDescriptor, ModelIdentity, ProviderKind, RuntimeProfile
 
+    from modelrack.adapters import AdapterRegistration, AdapterState
     from modelrack.streaming import StreamEvent
     from modelrack.types import GenerationRequest, GenerationResult
 
@@ -151,6 +152,15 @@ class ProviderCapabilities:
             setting and ignoring it — the latter produces a run whose recorded context never
             happened.
         embedding: Can produce embeddings.
+        adapter_hot_swap: Several LoRA adapters can be registered against one loaded base and
+            selected **per request**, with no reload between them. **Load-bearing, not
+            informational**, exactly like ``context_configurable``: it is what tells a caller
+            whether it may name an adapter at all, and a request carrying one to a provider that
+            declares ``False`` is :class:`~modelrack.errors.CapabilityUnsupported` rather than a
+            silent bare-base generation under the caller's adapter subject
+            (ADR-0062 decision 5). It is also what makes ADR-0065's local-only invariant hold by
+            construction: the only adapter that declares it is the one supervising a local
+            process, so an adapter artifact has no path to a remote endpoint.
     """
 
     streaming: bool = False
@@ -166,6 +176,7 @@ class ProviderCapabilities:
     kv_metrics: bool = False
     context_configurable: bool = False
     embedding: bool = False
+    adapter_hot_swap: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,5 +482,48 @@ class Provider(Protocol):
 
         Raises:
             CapabilityUnsupported: If this provider declares no ``residency_query``.
+        """
+        ...
+
+    def list_adapters(self) -> Sequence[AdapterState]:
+        """Report every adapter this provider holds, and whether each can be selected.
+
+        On the protocol rather than on the one concrete adapter that implements it for the same
+        reason ``refresh`` is: a caller holding a :class:`Provider` must be able to show adapter
+        rows and explain a pin that is not taking effect **without downcasting** to a concrete
+        class it would then have to import. ADR-0062 decision 1's "the ``Provider`` protocol does
+        not change" was about the load/unload seam, which is untouched — no lifecycle method was
+        added here.
+
+        Returns:
+            One :class:`~modelrack.adapters.AdapterState` per registration, in the order the
+            registrations were supplied. Empty when none have been. A snapshot: a server restart
+            between two calls changes every field but the registration.
+
+        Raises:
+            CapabilityUnsupported: If this provider declares no ``adapter_hot_swap``. Raised
+                rather than answering ``()``, because an empty list and "this provider has no
+                concept of adapters" are different facts and a caller that conflated them would
+                report a misconfiguration as an empty registry.
+        """
+        ...
+
+    def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None:
+        """Add adapters this provider may serve, without disturbing work in progress.
+
+        The path a rescan takes: an operator drops an adapter, the application reviews the drafted
+        manifest and hands the registration over here. Registration is a **launch-time** property
+        of a llama-server process, so an adapter that arrives after its base started is marked
+        :attr:`~modelrack.adapters.AdapterStatus.PENDING_RESTART` and folds in at the next natural
+        idle — never mid-work (ADR-0062 decision 3).
+
+        Args:
+            adapters: The registrations to add. A name already held is **replaced**, so a rescan
+                that found new bytes under an old name updates the identity rather than
+                duplicating it; the replacement is itself pending a restart wherever its base is
+                already running.
+
+        Raises:
+            CapabilityUnsupported: If this provider declares no ``adapter_hot_swap``.
         """
         ...

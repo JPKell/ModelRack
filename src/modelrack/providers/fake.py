@@ -102,6 +102,7 @@ from modelrack.provider import (
     ProviderHealth,
     ProviderStatus,
     ResidentModel,
+    refuse_capability,
     require_capability,
 )
 from modelrack.providers._fake_errors import failure_error, timeout_error
@@ -142,6 +143,7 @@ if TYPE_CHECKING:
 
     from baseaicore import RuntimeProfile
 
+    from modelrack.adapters import AdapterRegistration, AdapterState
     from modelrack.events import EventCallback
 
 __all__ = [
@@ -711,6 +713,28 @@ class FakeProvider:
             },
         )
 
+    def list_adapters(self) -> Sequence[AdapterState]:
+        """Refuse: this provider has no adapter mechanism.
+
+        Raises:
+            CapabilityUnsupported: Always — ``adapter_hot_swap`` is declared ``False``. Raised
+                rather than answering ``()``, because "no adapters registered" and "adapters are
+                not a thing here" are different facts and a caller that conflated them would
+                report a misconfiguration as an empty registry.
+        """
+        refuse_capability("adapter_hot_swap", action="report registered adapters")
+
+    def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None:
+        """Refuse: this provider has no adapter mechanism.
+
+        Args:
+            adapters: Ignored — the refusal comes first, so nothing is ever half-registered.
+
+        Raises:
+            CapabilityUnsupported: Always — ``adapter_hot_swap`` is declared ``False``.
+        """
+        refuse_capability("adapter_hot_swap", action="register an adapter")
+
     def _require_capability(self, capability: str, action: str) -> None:
         """Raise unless the named capability flag is declared by this provider's script.
 
@@ -918,6 +942,8 @@ class FakeProvider:
         """
         if streaming:
             self._require_capability("streaming", "stream a generation")
+        if request.adapter is not None:
+            self._require_capability("adapter_hot_swap", "run a request under a LoRA adapter")
         if request.tools:
             self._require_capability("tool_calling", "accept tool definitions")
         response_format = request.response_format

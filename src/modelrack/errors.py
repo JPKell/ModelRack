@@ -35,6 +35,7 @@ from typing import ClassVar
 from baseaicore import SuiteError
 
 __all__ = [
+    "AdapterNotFound",
     "CapabilityUnsupported",
     "ContextLimitExceeded",
     "GenerationCancelled",
@@ -88,6 +89,20 @@ class ProviderUnavailableReason(StrEnum):
 
     NOT_READY = "not_ready"
     """The provider answered, but said it is still loading and cannot serve yet."""
+
+    RESTART_PENDING = "restart_pending"
+    """A compatible adapter needs a server restart to fold in, and work is in flight.
+
+    Adapters are registered at launch, so an adapter that arrived after its base's server started
+    is usable only after a restart — and that restart happens at the next natural idle, **never
+    mid-work** (ADR-0062 decision 3). Asking for such an adapter while another request is streaming
+    is therefore refused rather than served on the bare base, which would answer with the wrong
+    subject and say nothing.
+
+    A **temporary** fact that resolves on its own: it is availability, not reliability
+    (ADR-0067 rule 2), so a router takes the subject out of the pool for now rather than counting a
+    failure against it. ``details`` names ``adapter`` and ``in_flight`` so the wait is explicable.
+    """
 
 
 class ProviderError(SuiteError):
@@ -231,3 +246,31 @@ class ProviderRejected(ProviderError):
     """
 
     code: ClassVar[str] = "PROVIDER_REJECTED"
+
+
+class AdapterNotFound(ProviderError):
+    """A request named an adapter this provider cannot select on the server that would serve it.
+
+    ``details`` carries ``adapter`` — the name the caller asked for — ``registered``, the names it
+    could have asked for, and ``reason``:
+
+    * ``"unknown"`` — no registration by that name was ever handed to this provider.
+    * ``"incompatible_base"`` — the registration exists and was **refused** for this base, with
+      ``declared_base_digest`` and ``served_base_digest`` beside it so the mismatch is readable
+      without a second call.
+
+    The registered set is there for the same reason
+    :class:`ModelNotFound` carries a model count: "adapter not found" against a provider with none
+    registered is a configuration that never took effect, and against one with three is a typo or a
+    stale pin.
+
+    **Never a silent bare-base generation** (ADR-0062 decision 4). Falling back would answer with a
+    different subject than the caller asked for and record it under the caller's name, which is the
+    fabricated comparability the whole adapter axis exists to prevent.
+
+    A **permanent** fact about this request, which is what separates it from
+    :attr:`ProviderUnavailableReason.RESTART_PENDING`: retrying changes nothing until a person or
+    an application changes the registrations.
+    """
+
+    code: ClassVar[str] = "ADAPTER_NOT_FOUND"

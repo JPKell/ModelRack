@@ -1,0 +1,16 @@
+[
+  {
+    "id": 0,
+    "path": "/models/adapters/factcheck.gguf",
+    "scale": 1.0,
+    "task_name": "",
+    "prompt_prefix": ""
+  },
+  {
+    "id": 1,
+    "path": "/models/adapters/house-voice.gguf",
+    "scale": 1.0,
+    "task_name": "",
+    "prompt_prefix": ""
+  }
+]

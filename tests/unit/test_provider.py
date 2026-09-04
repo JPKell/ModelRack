@@ -31,6 +31,8 @@ from baseaicore import (
 )
 
 from modelrack import (
+    AdapterRegistration,
+    AdapterState,
     GenerationRequest,
     GenerationResult,
     LoadResult,
@@ -88,6 +90,12 @@ class _StubProvider:
     def list_resident(self) -> Sequence[ResidentModel]:
         return ()
 
+    def list_adapters(self) -> Sequence[AdapterState]:
+        return ()
+
+    def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None:
+        return None
+
 
 def _typecheck_stub() -> Provider:
     """Return the stub as a :class:`~modelrack.Provider`.
@@ -136,6 +144,8 @@ class TestProtocolIsSatisfiable:
             "load",
             "unload",
             "list_resident",
+            "list_adapters",
+            "register_adapters",
         }
         assert expected <= set(dir(Provider))
 
@@ -168,6 +178,7 @@ class TestProviderCapabilities:
             "kv_metrics",
             "context_configurable",
             "embedding",
+            "adapter_hot_swap",
         }
 
     def test_every_flag_defaults_to_false(self) -> None:

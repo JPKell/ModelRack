@@ -14,6 +14,7 @@ from baseaicore import SuiteError
 
 from modelrack import errors
 from modelrack.errors import (
+    AdapterNotFound,
     CapabilityUnsupported,
     ContextLimitExceeded,
     GenerationCancelled,
@@ -37,6 +38,7 @@ _SPEC_CODES = {
     CapabilityUnsupported: "CAPABILITY_UNSUPPORTED",
     GenerationCancelled: "GENERATION_CANCELLED",
     ProviderRejected: "PROVIDER_REJECTED",
+    AdapterNotFound: "ADAPTER_NOT_FOUND",
 }
 
 

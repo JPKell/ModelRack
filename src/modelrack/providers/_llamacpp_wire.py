@@ -82,6 +82,7 @@ from modelrack.providers._openai_wire import (
 from modelrack.types import FinishReason, GenerationUsage, ResponseFormatKind, Timing
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
 
     from baseaicore import RuntimeProfile
@@ -91,6 +92,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_SERVER_EXECUTABLE",
+    "FORBIDDEN_LAUNCH_FLAGS",
+    "FORBIDDEN_REQUEST_KEYS",
+    "SLOT_PINNING_KEYS",
+    "ServerAdapter",
+    "adapter_launch_flags",
     "LlamaCppError",
     "build_chat_body",
     "build_completion_body",
@@ -101,7 +107,9 @@ __all__ = [
     "identity_for",
     "is_shard",
     "launch_flags",
+    "lora_field",
     "model_name_for",
+    "read_lora_adapters",
     "quantization_name",
     "read_backend_timing",
     "read_build_info",
@@ -116,6 +124,59 @@ DEFAULT_SERVER_EXECUTABLE: Final[str] = "llama-server"
 """The binary llama.cpp installs; resolved on ``PATH`` unless a path is given."""
 
 _LAUNCH_FLAG_PREFIX: Final[str] = "--"
+
+FORBIDDEN_REQUEST_KEYS: Final[frozenset[str]] = frozenset({"lora"})
+"""Request keys a caller may not set through ``provider_options``.
+
+``lora`` is the adapter selection itself. Reaching it through the escape hatch would change the
+weights that answer without changing :attr:`~modelrack.types.GenerationRequest.adapter`, so the
+result would be recorded against a subject that did not run — the fabricated comparability
+ADR-0058 exists to prevent. The supported channel is the request field, which the provider
+resolves, verifies and reports back on the result.
+"""
+
+SLOT_PINNING_KEYS: Final[frozenset[str]] = frozenset({"id_slot", "slot_id"})
+"""Request keys that bind a request to one of the server's slots, and so to that slot's cache.
+
+llama-server clears a slot's prompt cache when a task's adapter set differs from the slot's
+(``lora_should_clear_cache``), which is what makes prefix reuse across an adapter switch
+impossible **as long as slot selection stays the server's**. Pinning a slot is the one lever that
+reaches past that rule, so this adapter never sends one and refuses a caller that tries
+(ADR-0062 decision 4).
+"""
+
+FORBIDDEN_LAUNCH_FLAGS: Final[frozenset[str]] = frozenset(
+    {"--lora", "--lora-scaled", "--lora-init-without-apply"}
+)
+"""Launch flags a caller may not set through ``provider_options``.
+
+An adapter registered behind this package's back has no
+:class:`~modelrack.adapters.AdapterRegistration`, so it has no digest, no verified base and no
+name a result could report — it would be a weights delta the suite cannot name. Registration goes
+through :meth:`~modelrack.provider.Provider.register_adapters`, which verifies the base first.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ServerAdapter:
+    """One adapter a running server has actually registered, as the server itself reports it.
+
+    Read back from ``GET /lora-adapters`` after the server is healthy rather than inferred from
+    argv order: the id in a request's ``lora`` field is the server's own index, and assuming it
+    from the command line would put a whole class of off-by-one wrong-adapter bugs one refactor
+    away — the failure mode that produces plausible, confident, wrong output.
+
+    Attributes:
+        server_id: The index llama-server assigned, and the ``id`` a request sends.
+        path: The artifact path the server reports, matched against what was launched.
+        name: The registration's name, once the path has been matched to one.
+    """
+
+    server_id: int
+    path: str
+    name: str
+
+
 _LOOPBACK_HOST: Final[str] = "127.0.0.1"
 _SHARD_PATTERN: Final[re.Pattern[str]] = re.compile(r"-\d{5}-of-\d{5}\.gguf$")
 _MODEL_KIND: Final[str] = "model"
@@ -403,6 +464,98 @@ def request_options(profile: RuntimeProfile) -> dict[str, Any]:
     }
 
 
+def adapter_launch_flags(artifact_paths: Sequence[Path]) -> tuple[str, ...]:
+    """Return the flags that pre-register ``artifact_paths`` without applying any of them.
+
+    ``--lora`` once per artifact, in the order given — which is the order the server assigns ids
+    in — followed by ``--lora-init-without-apply`` so nothing is active until a request asks for
+    it (ADR-0062 decision 1). Empty for no adapters, so a server launched without any has an argv
+    byte-for-byte identical to Phase 6's.
+
+    Args:
+        artifact_paths: The adapter artifacts to register, already verified against the base.
+
+    Returns:
+        The flags, or ``()`` when there are none.
+    """
+    if not artifact_paths:
+        return ()
+    flags: list[str] = []
+    for path in artifact_paths:
+        flags += ["--lora", str(path)]
+    flags.append("--lora-init-without-apply")
+    return tuple(flags)
+
+
+def read_lora_adapters(payload: object, *, by_path: Mapping[str, str]) -> tuple[ServerAdapter, ...]:
+    """Read ``GET /lora-adapters`` into the ids this adapter will send.
+
+    Args:
+        payload: The server's response — an array of ``{id, path, scale, …}`` objects.
+        by_path: Artifact path to registration name, for the adapters that were launched.
+
+    Returns:
+        One :class:`ServerAdapter` per entry whose ``path`` matches a launched registration, in
+        server-id order. An entry the launch did not ask for is dropped rather than trusted: it
+        would be an adapter this package cannot name, and naming is the whole point.
+    """
+    if not isinstance(payload, list):
+        return ()
+    found: list[ServerAdapter] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        server_id = entry.get("id")
+        path = entry.get("path")
+        if (
+            not isinstance(server_id, int)
+            or isinstance(server_id, bool)
+            or not isinstance(path, str)
+        ):
+            continue
+        name = by_path.get(path)
+        if name is None:
+            continue
+        found.append(ServerAdapter(server_id=server_id, path=path, name=name))
+    return tuple(sorted(found, key=lambda adapter: adapter.server_id))
+
+
+def lora_field(
+    registered: Sequence[ServerAdapter], *, selected: str | None
+) -> list[dict[str, Any]] | None:
+    """Build the ``lora`` request field: the complete adapter configuration, always.
+
+    **Complete, not minimal, and this is the correctness decision of Phase 7.** llama-server treats
+    an *absent* ``lora`` field as "restore the launch-time set" — ``slot.lora =
+    params_base.lora_adapters`` in ``launch_slot_with_task`` — and takes that branch **without
+    consulting** ``lora_should_clear_cache``. Since ``--lora`` registers an adapter at scale
+    ``1.0`` and ``--lora-init-without-apply`` changes only whether the set is applied at *init*, a
+    bare-base request that sent no ``lora`` field to an adapter-registered server would run with
+    **every** registered adapter applied, against a prompt cache built under whatever ran last. So
+    a request to such a server always states the whole configuration, and a request to a server
+    with no adapters registered sends no ``lora`` key at all — byte-for-byte Phase 6's body.
+
+    At most one entry is ever enabled, at exactly ``1.0`` (ADR-0063): the others are present at
+    ``0.0``, which is a disable and not a composition. There is no per-request scale, and there is
+    nowhere for one to be passed.
+
+    Args:
+        registered: What the server has registered, in server-id order.
+        selected: The registration name to run under, or ``None`` for the bare base. Assumed to
+            name one of ``registered`` — the provider resolves and refuses before this is reached.
+
+    Returns:
+        The complete list, or ``None`` when the server has no adapters registered and the key
+        must be absent.
+    """
+    if not registered:
+        return None
+    return [
+        {"id": adapter.server_id, "scale": 1.0 if adapter.name == selected else 0.0}
+        for adapter in registered
+    ]
+
+
 def build_launch_argv(
     *,
     server_path: str,
@@ -410,6 +563,7 @@ def build_launch_argv(
     alias: str,
     port: int,
     profile: RuntimeProfile,
+    adapter_paths: Sequence[Path] = (),
 ) -> tuple[str, ...]:
     """Build the complete command line for one supervised server.
 
@@ -419,6 +573,11 @@ def build_launch_argv(
     name this adapter serves the file under; ``--jinja`` selects the template engine tool
     calling needs; ``--no-webui`` drops the browser UI nothing here uses. Profile flags follow,
     and ``provider_options`` flags last, so a caller's explicit flag wins on a conflict.
+
+    ``adapter_paths`` become ``--lora`` flags and one ``--lora-init-without-apply``, placed
+    **before** the profile flags so that the id the server assigns each adapter depends only on
+    the registration order and never on which profile flags a request happened to set. With no
+    adapters the argv is byte-for-byte what Phase 6 built.
     """
     return (
         server_path,
@@ -432,6 +591,7 @@ def build_launch_argv(
         str(port),
         "--jinja",
         "--no-webui",
+        *adapter_launch_flags(adapter_paths),
         *launch_flags(profile),
     )
 
@@ -461,7 +621,9 @@ def _sampling_fields(request: GenerationRequest, *, max_tokens_key: str) -> dict
     return body
 
 
-def build_completion_body(request: GenerationRequest, *, stream: bool) -> dict[str, Any]:
+def build_completion_body(
+    request: GenerationRequest, *, stream: bool, lora: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     """Build the native ``POST /completion`` body for a completion-style request.
 
     The prompt is sent raw — no template is applied, which is what a caller choosing ``prompt``
@@ -471,6 +633,8 @@ def build_completion_body(request: GenerationRequest, *, stream: bool) -> dict[s
     before this function is reached.
     """
     body: dict[str, Any] = {"prompt": request.prompt, "stream": stream}
+    if lora is not None:
+        body["lora"] = lora
     body.update(_sampling_fields(request, max_tokens_key="n_predict"))
     if request.response_format is not None:
         if request.response_format.kind is ResponseFormatKind.JSON:
@@ -481,7 +645,13 @@ def build_completion_body(request: GenerationRequest, *, stream: bool) -> dict[s
     return body
 
 
-def build_chat_body(request: GenerationRequest, *, alias: str, stream: bool) -> dict[str, Any]:
+def build_chat_body(
+    request: GenerationRequest,
+    *,
+    alias: str,
+    stream: bool,
+    lora: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Build the ``POST /v1/chat/completions`` body for a chat-style request.
 
     The OpenAI chat shape, with two llama.cpp-specific choices: ``repeat_penalty`` rather than
@@ -494,6 +664,8 @@ def build_chat_body(request: GenerationRequest, *, alias: str, stream: bool) -> 
         "messages": [message_payload(message) for message in request.messages],
         "stream": stream,
     }
+    if lora is not None:
+        body["lora"] = lora
     if stream:
         body["stream_options"] = {"include_usage": True}
     body.update(_sampling_fields(request, max_tokens_key="max_tokens"))

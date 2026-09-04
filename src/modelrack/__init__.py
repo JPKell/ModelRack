@@ -50,6 +50,12 @@ about its own work is never merged with what this process *observed*, which is w
 from __future__ import annotations
 
 from modelrack.__about__ import __version__
+from modelrack.adapters import (
+    GGUF_ADAPTER_FORMAT,
+    AdapterRegistration,
+    AdapterState,
+    AdapterStatus,
+)
 from modelrack.cache import (
     DEFAULT_METADATA_TTL_SECONDS,
     CacheStats,
@@ -57,6 +63,7 @@ from modelrack.cache import (
     MetadataSnapshot,
 )
 from modelrack.errors import (
+    AdapterNotFound,
     CapabilityUnsupported,
     ContextLimitExceeded,
     GenerationCancelled,
@@ -119,7 +126,12 @@ from modelrack.types import (
 __all__ = [
     "DEFAULT_METADATA_TTL_SECONDS",
     "FORCE_UNLOAD",
+    "GGUF_ADAPTER_FORMAT",
     "RESIDENCY_QUERY",
+    "AdapterNotFound",
+    "AdapterRegistration",
+    "AdapterState",
+    "AdapterStatus",
     "CacheStats",
     "CancellationToken",
     "CapabilityUnsupported",

@@ -41,6 +41,8 @@ from baseaicore import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from baseaicore import AdapterIdentity, IdentityConfidence
+
     # Imported for typing only: `streaming` imports `GenerationResult` from this module at
     # runtime, so a runtime import here would close the cycle. `from __future__ import
     # annotations` makes every annotation lazy, so the name is never needed at import time.
@@ -542,6 +544,15 @@ class GenerationRequest:
         cancel: A token that stops a streamed generation. Effective only through
             :meth:`~modelrack.provider.Provider.stream`; see
             :class:`~modelrack.errors.GenerationCancelled`.
+        adapter: The **name** of a registered LoRA adapter to run this request under, or ``None``
+            for the bare base. A pin, with ``model``-override semantics: the provider resolves it
+            against what it has registered and raises
+            :class:`~modelrack.errors.AdapterNotFound` rather than falling back. One adapter, never
+            two — the field is single-valued because composition would need an identity for a
+            weighted set, which ADR-0063 declines to
+            invent — and its scale is fixed at ``1.0`` and is deliberately not a parameter.
+            Passing one to a provider that has not declared ``adapter_hot_swap`` raises
+            :class:`~modelrack.errors.CapabilityUnsupported`.
         metadata: Caller correlation IDs. **Never sent to the provider** — it travels with the
             request so an ``on_event`` callback and a returned result can be tied back to the
             caller's own run or job, and putting it on the wire would leak internal identifiers.
@@ -550,6 +561,7 @@ class GenerationRequest:
     identity: ModelIdentity
     messages: tuple[Message, ...] = ()
     prompt: str | None = None
+    adapter: str | None = None
     runtime_profile: RuntimeProfile = field(default_factory=RuntimeProfile)
     sampling: SamplingParameters = field(default_factory=SamplingParameters)
     tools: tuple[ToolDefinition, ...] = ()
@@ -603,6 +615,19 @@ class GenerationResult:
         provider_version: The provider's own version, recorded because a provider upgrade is an
             environment drift signal that reduces confidence in evidence measured before it
             (ADR-0017).
+        adapter: The adapter axis of the subject that actually ran, or ``None`` when none was
+            applied. Carried for the same reason ``identity`` is: a stored result must name its
+            **whole** subject, because evidence measured on ``(base, adapterA)`` applies to nothing
+            else (ADR-0058 §4), and a
+            result that named only its base would let an adapter's numbers be read as the base's.
+            ``None`` is the byte-for-byte-unchanged case — a subject with no adapter is exactly
+            what it was before the axis existed.
+        adapter_base_confidence: How well this adapter's claim about its base was proved:
+            ``DIGEST`` when the manifest declared a digest and it matched the base actually served,
+            ``NAME_ONLY`` when it declared none and only the names agreed. ``None`` when no adapter
+            ran. A ``NAME_ONLY`` result is a **permanent caveat** that every surface naming this
+            subject must show (ADR-0058 rule 5) — it is about the *base claim*, never about the
+            adapter's own identity, which is always digest-bound.
         raw: The provider's untouched response, for **diagnostics only**. Reading it for business
             logic is a boundary violation (ADR-0007
             rule 1); it exists so a surprising result can be explained, and adapters must keep API
@@ -617,6 +642,8 @@ class GenerationResult:
     tool_calls: tuple[ToolCall, ...] = ()
     thinking: str | Unsupported = UNSUPPORTED
     provider_version: str | None = None
+    adapter: AdapterIdentity | None = None
+    adapter_base_confidence: IdentityConfidence | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

@@ -50,6 +50,7 @@ from baseaicore import (
 
 from conftest import FakeLauncher, FakeMonotonic, FakeProcessTable, FakeSleep
 from modelrack import (
+    AdapterNotFound,
     CapabilityUnsupported,
     GenerationCancelled,
     GenerationRequest,
@@ -739,6 +740,48 @@ class ProviderConformanceSuite:
             with pytest.raises(CapabilityUnsupported) as raised:
                 provider.unload(identity)
             assert raised.value.details["capability"] == "force_unload"
+
+    def test_adapter_selection_is_honoured_or_refused(
+        self, provider: Provider, identity: ModelIdentity, capabilities: ProviderCapabilities
+    ) -> None:
+        """ADR-0062 decision 5: ``adapter_hot_swap`` is load-bearing, not informational.
+
+        A provider that has not declared it refuses a request naming an adapter rather than
+        serving the bare base — which would answer with a different subject than the caller asked
+        for and record it under the caller's name. A provider that *has* declared it refuses an
+        adapter it does not hold, which is the same rule seen from the other side: never a silent
+        substitution.
+        """
+        request = self.request(identity, adapter="no-such-adapter")
+
+        if capabilities.adapter_hot_swap:
+            with pytest.raises(AdapterNotFound) as unknown:
+                provider.generate(request)
+            assert unknown.value.details["adapter"] == "no-such-adapter"
+            assert "registered" in unknown.value.details
+        else:
+            with pytest.raises(CapabilityUnsupported) as raised:
+                provider.generate(request)
+            assert raised.value.details["capability"] == "adapter_hot_swap"
+
+    def test_the_adapter_registry_is_answered_or_refused(
+        self, provider: Provider, capabilities: ProviderCapabilities
+    ) -> None:
+        """An empty registry and "adapters are not a thing here" are different facts."""
+        if capabilities.adapter_hot_swap:
+            assert list(provider.list_adapters()) == []
+        else:
+            with pytest.raises(CapabilityUnsupported) as raised:
+                provider.list_adapters()
+            assert raised.value.details["capability"] == "adapter_hot_swap"
+            with pytest.raises(CapabilityUnsupported):
+                provider.register_adapters(())
+
+    def test_a_request_naming_no_adapter_reports_none(
+        self, provider: Provider, identity: ModelIdentity
+    ) -> None:
+        """A-1's invariant, on every adapter: absent is absent, never an empty-ish value."""
+        assert provider.generate(self.request(identity)).adapter is None
 
     def test_residency_query_is_honoured_or_refused(
         self, provider: Provider, identity: ModelIdentity, capabilities: ProviderCapabilities

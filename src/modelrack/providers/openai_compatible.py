@@ -156,6 +156,7 @@ if TYPE_CHECKING:
 
     from baseaicore import RuntimeProfile
 
+    from modelrack.adapters import AdapterRegistration, AdapterState
     from modelrack.events import EventCallback
     from modelrack.streaming import StreamEvent
     from modelrack.types import GenerationRequest
@@ -1030,6 +1031,28 @@ class OpenAICompatibleProvider:
             details={"reference": reference, "known_model_count": len(names)},
         )
 
+    def list_adapters(self) -> Sequence[AdapterState]:
+        """Refuse: this provider has no adapter mechanism.
+
+        Raises:
+            CapabilityUnsupported: Always — ``adapter_hot_swap`` is declared ``False``. Raised
+                rather than answering ``()``, because "no adapters registered" and "adapters are
+                not a thing here" are different facts and a caller that conflated them would
+                report a misconfiguration as an empty registry.
+        """
+        refuse_capability("adapter_hot_swap", action="report registered adapters")
+
+    def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None:
+        """Refuse: this provider has no adapter mechanism.
+
+        Args:
+            adapters: Ignored — the refusal comes first, so nothing is ever half-registered.
+
+        Raises:
+            CapabilityUnsupported: Always — ``adapter_hot_swap`` is declared ``False``.
+        """
+        refuse_capability("adapter_hot_swap", action="register an adapter")
+
     def _build_body(self, request: GenerationRequest, *, stream: bool) -> dict[str, Any]:
         """Build the ``/v1/chat/completions`` request body.
 
@@ -1042,6 +1065,8 @@ class OpenAICompatibleProvider:
         endpoint-specific restriction to enforce here: tools and a completion-style prompt are not
         in tension the way they are for Ollama's ``/api/generate``.
         """
+        if request.adapter is not None:
+            refuse_capability("adapter_hot_swap", action="run a request under a LoRA adapter")
         if request.runtime_profile.context_size is not None:
             refuse_capability("context_configurable", action="serve a caller-chosen context")
         messages = request.messages or (Message(role=Role.USER, content=request.prompt or ""),)

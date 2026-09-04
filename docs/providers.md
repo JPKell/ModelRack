@@ -25,6 +25,7 @@ would produce a result you would misread as the model's own choice.
 | `kv_metrics` | no | no | no | no | no | KV-cache metrics are reported. |
 | `context_configurable` | yes | no | yes | yes | no | **Load-bearing.** Whether you may set a served context, or must record the one you got as *assumed*. |
 | `embedding` | no | no | no | no | no | Embeddings can be produced. Out of scope until spec §21. |
+| `adapter_hot_swap` | no | no | yes | no | no | **Load-bearing.** Whether `GenerationRequest.adapter` may name a LoRA adapter, and whether `list_adapters()`/`register_adapters()` answer. When `False`, all three refuse. |
 
 ## Reading the columns
 

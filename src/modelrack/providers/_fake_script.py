@@ -73,6 +73,12 @@ nowhere to put a log probability, a KV-cache counter or an embedding vector: a f
 would be advertising a capability whose result no caller could read. :class:`FakeScript` refuses
 them for the same reason.
 
+``adapter_hot_swap`` stays ``False`` on a stronger ground than "not implemented": an adapter is a
+**weights delta on a served artifact**, so a fake that declared it would have to invent behaviour
+for a subject whose whole point is that its behaviour was measured. The fake is where a consumer
+meets the refusal path (ADR-0062 decision 5), which is the half of that flag every application
+must handle.
+
 This is the default declaration, so an unscripted :class:`~modelrack.providers.fake.FakeProvider`
 behaves like a capable local runtime. It is also the more forgiving of the two constants, and the
 audit §11.3 names a too-forgiving fake as this

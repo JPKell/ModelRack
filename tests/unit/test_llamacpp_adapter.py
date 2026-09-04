@@ -230,15 +230,22 @@ class _FakeServer:
     _DEFAULTS: dict[str, Any] = {
         "health": "health_ok.json",
         "props": "props.json",
+        "lora": None,
         "chat": "chat_complete.json",
         "chat_stream": "chat_stream.sse",
         "completion": "completion.json",
         "completion_stream": "completion_stream.sse",
     }
 
-    def __init__(self, router: respx.MockRouter, load: Callable[[str], Any]) -> None:
+    def __init__(
+        self,
+        router: respx.MockRouter,
+        load: Callable[[str], Any],
+        launcher: FakeLauncher | None = None,
+    ) -> None:
         self._router = router
         self._load = load
+        self._launcher = launcher
         self._plans: dict[int, dict[str, Any]] = {}
 
     @property
@@ -252,6 +259,39 @@ class _FakeServer:
             self._plans[port] = plan
             self._register(port, plan)
         plan.update(choices)
+
+    def _lora_response(self, port: int, plan: dict[str, Any]) -> httpx.Response:
+        """Answer ``GET /lora-adapters`` the way a real server does: from its own command line.
+
+        A recorded body cannot carry this test's temporary paths, so the response is rendered
+        from the ``--lora`` flags the launcher actually saw — which is exactly what the server
+        reports (``server-task.cpp``, ``server_task_result_get_lora::to_json``), and which is
+        what makes "the id is the server's, not argv order" a claim a test can break.
+        """
+        override = plan["lora"]
+        if override is not None:
+            if isinstance(override, Exception):
+                raise override
+            if isinstance(override, httpx.Response):
+                return override
+            return httpx.Response(200, json=self._load(override))
+        argv = self._argv_for(port)
+        paths = [argv[index + 1] for index, flag in enumerate(argv) if flag == "--lora"]
+        return httpx.Response(
+            200,
+            json=[
+                {"id": index, "path": path, "scale": 1.0, "task_name": "", "prompt_prefix": ""}
+                for index, path in enumerate(paths)
+            ],
+        )
+
+    def _argv_for(self, port: int) -> tuple[str, ...]:
+        if self._launcher is None:
+            return ()
+        for spec in reversed(self._launcher.specs):
+            if spec.port == port:
+                return tuple(spec.argv)
+        return ()
 
     def _respond(self, plan: dict[str, Any], key: str) -> httpx.Response:
         choice = plan[key]
@@ -275,6 +315,9 @@ class _FakeServer:
         self._router.get(f"{base}/props").mock(
             side_effect=lambda _request: self._respond(plan, "props")
         )
+        self._router.get(f"{base}/lora-adapters").mock(
+            side_effect=lambda _request: self._lora_response(port, plan)
+        )
         self._router.post(f"{base}/v1/chat/completions").mock(
             side_effect=lambda request: self._respond(
                 plan, "chat_stream" if streamed(request) else "chat"
@@ -288,9 +331,11 @@ class _FakeServer:
 
 
 @pytest.fixture
-def server(load_llamacpp_fixture: Callable[[str], Any]) -> Iterator[_FakeServer]:
+def server(
+    load_llamacpp_fixture: Callable[[str], Any], launcher: FakeLauncher
+) -> Iterator[_FakeServer]:
     with respx.mock(assert_all_called=False) as router:
-        yield _FakeServer(router, load_llamacpp_fixture)
+        yield _FakeServer(router, load_llamacpp_fixture, launcher)
 
 
 class TestConstructionAndHealth:

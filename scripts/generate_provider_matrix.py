@@ -74,6 +74,10 @@ _NOTES: dict[str, str] = {
         "as *assumed*."
     ),
     "embedding": "Embeddings can be produced. Out of scope until spec §21.",
+    "adapter_hot_swap": (
+        "**Load-bearing.** Whether `GenerationRequest.adapter` may name a LoRA adapter, and "
+        "whether `list_adapters()`/`register_adapters()` answer. When `False`, all three refuse."
+    ),
 }
 
 

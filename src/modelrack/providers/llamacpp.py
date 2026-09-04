@@ -63,6 +63,8 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import httpx
 from baseaicore import (
     UNSUPPORTED,
+    AdapterIdentity,
+    IdentityConfidence,
     ModelIdentity,
     ProviderKind,
     ValidationError,
@@ -70,10 +72,13 @@ from baseaicore import (
     is_supported,
     monotonic_ns,
     utc_now,
+    verify_adapter_base_compatibility,
 )
 
+from modelrack.adapters import AdapterRegistration, AdapterState, AdapterStatus
 from modelrack.cache import DEFAULT_METADATA_TTL_SECONDS, CacheStats, MetadataCache
 from modelrack.errors import (
+    AdapterNotFound,
     CapabilityUnsupported,
     ContextLimitExceeded,
     GenerationCancelled,
@@ -128,7 +133,11 @@ from modelrack.providers._llamacpp_process import (
 )
 from modelrack.providers._llamacpp_wire import (
     DEFAULT_SERVER_EXECUTABLE,
+    FORBIDDEN_LAUNCH_FLAGS,
+    FORBIDDEN_REQUEST_KEYS,
+    SLOT_PINNING_KEYS,
     LlamaCppError,
+    ServerAdapter,
     build_chat_body,
     build_completion_body,
     build_descriptor,
@@ -138,12 +147,14 @@ from modelrack.providers._llamacpp_wire import (
     identity_for,
     is_shard,
     launch_flags,
+    lora_field,
     model_name_for,
     read_backend_timing,
     read_build_info,
     read_chat_usage,
     read_completion_usage,
     read_error,
+    read_lora_adapters,
     read_served_context,
 )
 from modelrack.providers._openai_wire import (
@@ -209,6 +220,7 @@ _CAPABILITIES: Final[ProviderCapabilities] = ProviderCapabilities(
     kv_metrics=False,
     context_configurable=True,
     embedding=False,
+    adapter_hot_swap=True,
 )
 """What a llama-server this adapter spawns can do.
 
@@ -221,12 +233,15 @@ a per-model template argument this phase does not expose. ``force_unload``, ``re
 and ``context_configurable`` are ``True`` because they are literally what supervision is —
 spawn, terminate, read the process table, ``--ctx-size``. ``logprobs``, ``kv_metrics`` and
 ``embedding`` stay ``False``: the server offers each, and nothing here reads them, which is what
-"a capability nobody tested" means (ADR-0007 rule 2).
+"a capability nobody tested" means (ADR-0007 rule 2). ``adapter_hot_swap`` is the one flag ``True``
+in this package: llama-server registers adapters at launch and selects among them per request with
+no reload (ADR-0062), and this is the adapter that supervises that process.
 """
 
 _REQUEST_HEADERS: Final[dict[str, str]] = {"Content-Type": "application/json"}
 _HEALTH_PATH: Final[str] = "/health"
 _PROPS_PATH: Final[str] = "/props"
+_LORA_PATH: Final[str] = "/lora-adapters"
 _COMPLETION_PATH: Final[str] = "/completion"
 _CHAT_PATH: Final[str] = "/v1/chat/completions"
 _DONE_SENTINEL: Final[str] = "[DONE]"
@@ -421,6 +436,60 @@ class _Entry:
 
 
 @dataclass(frozen=True, slots=True)
+class _Selection:
+    """The adapter axis one request resolved to, carried to the result that reports it."""
+
+    name: str
+    identity: AdapterIdentity
+    confidence: IdentityConfidence
+
+
+@dataclass(frozen=True, slots=True)
+class _Verification:
+    """What launch-time verification decided about one registration against one served base.
+
+    ``confidence`` set means the adapter was registered; ``reason`` set means it was refused with
+    that explanation. Exactly one is ever set — a candidate is either applied or refused, never
+    dropped without a record (ADR-0058 rule 5).
+    """
+
+    confidence: IdentityConfidence | None = None
+    reason: str | None = None
+
+
+class _InFlightLease:
+    """One request's claim on a server, released exactly once however the request ends.
+
+    A restart that folds in a new adapter, and a restart forced by a profile change, both wait on
+    the count these leases keep. Release is idempotent because a stream can end three ways —
+    drained, abandoned, or collected — and two of them can happen to one iterator.
+    """
+
+    __slots__ = ("_counts", "_lock", "_model_name", "_released")
+
+    def __init__(self, counts: dict[str, int], lock: threading.RLock, model_name: str) -> None:
+        """Take the claim; the caller holds no lock."""
+        self._counts = counts
+        self._lock = lock
+        self._model_name = model_name
+        self._released = False
+        with lock:
+            counts[model_name] = counts.get(model_name, 0) + 1
+
+    def release(self) -> None:
+        """Give the claim back. Safe to call any number of times, from any thread."""
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+            remaining = self._counts.get(self._model_name, 1) - 1
+            if remaining > 0:
+                self._counts[self._model_name] = remaining
+            else:
+                self._counts.pop(self._model_name, None)
+
+
+@dataclass(frozen=True, slots=True)
 class _HeaderSnapshot:
     """A parsed header with the instant it was read, for the metadata cache."""
 
@@ -457,6 +526,11 @@ class LlamaCppProvider:
             spawn, not at construction. Named by the constructing application inside its own data
             root, because this package picks no directory of its own (spec §12) and pid files are
             what make an orphan from a crashed process recoverable by the next one (ADR-0062).
+        adapters: LoRA adapters this provider may serve, supplied by the application that read
+            the operator's directory — **this package never reads it** (ADR-0061 rule 3). Each is
+            verified against the base actually launched, per base, at spawn; more may be handed
+            over later through :meth:`register_adapters`, and
+            :meth:`list_adapters` reports what became of each.
         server_path: The ``llama-server`` executable — a bare name resolved on ``PATH`` or a
             path. Not checked at construction: :meth:`health` reports a missing binary as
             ``UNAVAILABLE`` rather than the constructor refusing to build an adapter the health
@@ -503,6 +577,7 @@ class LlamaCppProvider:
         model_directory: str | Path,
         *,
         state_dir: str | Path,
+        adapters: Sequence[AdapterRegistration] = (),
         server_path: str | Path = DEFAULT_SERVER_EXECUTABLE,
         port_range: tuple[int, int] = DEFAULT_PORT_RANGE,
         startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS,
@@ -558,7 +633,16 @@ class LlamaCppProvider:
             stderr_tail_bytes=DEFAULT_STDERR_TAIL_BYTES,
         )
         self._identities: dict[str, ModelIdentity] = {}
+        # Registration order is server-id order, so a dict (insertion-ordered) is the record.
+        self._registrations: dict[str, AdapterRegistration] = {}
+        # Per running server: what it registered, and what launch-time verification decided.
+        self._server_adapters: dict[str, tuple[ServerAdapter, ...]] = {}
+        self._verifications: dict[str, dict[str, _Verification]] = {}
+        # Per running server: how many requests are using it right now. A restart waits on this.
+        self._in_flight: dict[str, int] = {}
         self._lock = threading.RLock()
+        for registration in adapters:
+            self._registrations[registration.name] = registration
         self._idle_base_url = f"http://127.0.0.1:{port_range[0]}"
         self._client = client or build_client(
             base_url=self._idle_base_url,
@@ -641,6 +725,163 @@ class LlamaCppProvider:
     def capabilities(self) -> ProviderCapabilities:
         """Report what this adapter can do — the static declaration, no request made."""
         return _CAPABILITIES
+
+    # ------------------------------------------------------------------------------- adapters
+
+    def list_adapters(self) -> Sequence[AdapterState]:
+        """Report every registration this provider holds, and whether each can be selected now.
+
+        Returns:
+            One state per registration, in the order the registrations arrived — which is also the
+            order they are passed to ``--lora``, and so the order the server assigns ids in. A
+            registration is :attr:`~modelrack.adapters.AdapterStatus.REGISTERED` when a running
+            server has it, :attr:`~modelrack.adapters.AdapterStatus.PENDING_RESTART` when its
+            base is running but was launched before it arrived,
+            :attr:`~modelrack.adapters.AdapterStatus.INCOMPATIBLE` when launch-time verification
+            refused it against the base actually served, and
+            :attr:`~modelrack.adapters.AdapterStatus.AWAITING_BASE` when no server for its base is
+            running at all.
+
+            A snapshot, not a live view. Nothing here probes: the states are read from what the
+            last spawn recorded, so calling this is free and never starts a server.
+        """
+        with self._lock:
+            return tuple(
+                self._state_for(registration) for registration in self._registrations.values()
+            )
+
+    def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None:
+        """Add adapters this provider may serve, without disturbing anything already running.
+
+        Registration is a **launch-time** property of a llama-server process, so nothing here
+        touches a running server: an adapter whose base is already up becomes
+        :attr:`~modelrack.adapters.AdapterStatus.PENDING_RESTART` and folds in at the next natural
+        idle — the next request that arrives with nothing in flight against that server, or an
+        :meth:`unload` (ADR-0062 decision 3). Never mid-work, and never by restarting a server
+        under a stream.
+
+        Args:
+            adapters: The registrations to add. A name already held is **replaced**: a rescan that
+                found new bytes under a familiar name is a new subject, and keeping the old one
+                would leave the provider able to serve an identity the operator has retired.
+                Replacing one whose base is running makes the replacement pending, so the running
+                server keeps serving the identity it actually launched with until it restarts.
+        """
+        with self._lock:
+            for registration in adapters:
+                self._registrations[registration.name] = registration
+
+    def _state_for(self, registration: AdapterRegistration) -> AdapterState:
+        """Decide one registration's state from what the running servers recorded. Lock held."""
+        for model_name, verifications in self._verifications.items():
+            verification = verifications.get(registration.name)
+            if verification is None:
+                continue
+            if verification.reason is not None:
+                return AdapterState(
+                    adapter=registration,
+                    status=AdapterStatus.INCOMPATIBLE,
+                    base_model_name=model_name,
+                    reason=verification.reason,
+                )
+            server_id = next(
+                (
+                    adapter.server_id
+                    for adapter in self._server_adapters.get(model_name, ())
+                    if adapter.name == registration.name
+                ),
+                None,
+            )
+            if server_id is None:
+                # Verified compatible at launch, but the server did not report it back: it was
+                # launched with an argv this registration was not on, or the server rejected the
+                # file. Either way it is not selectable, and saying so beats implying it is.
+                return AdapterState(
+                    adapter=registration,
+                    status=AdapterStatus.PENDING_RESTART,
+                    base_model_name=model_name,
+                    base_confidence=verification.confidence,
+                    reason=(
+                        f"The server for {model_name!r} did not report this adapter; it folds in "
+                        "at the next restart."
+                    ),
+                )
+            return AdapterState(
+                adapter=registration,
+                status=AdapterStatus.REGISTERED,
+                base_model_name=model_name,
+                base_confidence=verification.confidence,
+                server_id=server_id,
+            )
+        # No running server has verified it. Is one running that it *would* apply to?
+        for model_name, base in self._identities.items():
+            verification = self._verify(registration, base)
+            if verification is None:
+                continue
+            if verification.reason is not None:
+                return AdapterState(
+                    adapter=registration,
+                    status=AdapterStatus.INCOMPATIBLE,
+                    base_model_name=model_name,
+                    reason=verification.reason,
+                )
+            return AdapterState(
+                adapter=registration,
+                status=AdapterStatus.PENDING_RESTART,
+                base_model_name=model_name,
+                base_confidence=verification.confidence,
+                reason=(
+                    f"The server for {model_name!r} was launched before this adapter was "
+                    "registered; it folds in at the next idle."
+                ),
+            )
+        return AdapterState(
+            adapter=registration,
+            status=AdapterStatus.AWAITING_BASE,
+            base_model_name=registration.base_model_name,
+        )
+
+    @staticmethod
+    def _verify(registration: AdapterRegistration, base: ModelIdentity) -> _Verification | None:
+        """Decide whether ``registration`` applies to ``base``, and how well it was proved.
+
+        Candidacy comes first and is deliberately **either** handle: a registration that declares a
+        base digest is a candidate for any base serving those bytes, whatever the file is called —
+        which is what makes a rename safe (ADR-0061 rule 5) — and one that declares only a name is
+        a candidate for the base of that name. Everything else is another base's adapter, and
+        silence about it is correct.
+
+        Returns:
+            ``None`` when this is not this base's adapter at all; a :class:`_Verification` with a
+            confidence when it applies; one with a reason when it is **refused**, which is the
+            dangerous case — the manifest names this base and its digest says otherwise, meaning
+            either the manifest is stale or the file changed under it.
+        """
+        declared_digest = registration.base_artifact_digest
+        names_match = registration.base_model_name == base.provider_model_name
+        if declared_digest is not None:
+            if declared_digest != base.artifact_digest and not names_match:
+                return None
+        elif not names_match:
+            return None
+        try:
+            confidence = verify_adapter_base_compatibility(
+                base,
+                declared_base_name=registration.base_model_name,
+                declared_base_digest=declared_digest,
+            )
+        except ValidationError as exc:
+            return _Verification(reason=str(exc))
+        return _Verification(confidence=confidence)
+
+    def _verify_all(self, base: ModelIdentity) -> dict[str, _Verification]:
+        """Verify every held registration against one served base. Lock held."""
+        verified: dict[str, _Verification] = {}
+        for name, registration in self._registrations.items():
+            verification = self._verify(registration, base)
+            if verification is not None:
+                verified[name] = verification
+        return verified
 
     # ------------------------------------------------------------------------- metadata cache
 
@@ -891,8 +1132,11 @@ class LlamaCppProvider:
             ProviderProtocolError: If the response cannot be parsed.
             ProviderTimeout: If the server does not answer in time.
         """
-        is_chat, path, body = self._build_request(request, stream=False)
+        is_chat, path = self._route(request)
         handle = self._ensure_server(request)
+        selection = self._select_adapter(request, handle)
+        body = self._build_body(request, handle, is_chat=is_chat, stream=False, selection=selection)
+        lease = self._lease(handle)
         start_ns = self._monotonic()
         self._events.started(
             operation="generate",
@@ -900,7 +1144,9 @@ class LlamaCppProvider:
             metadata=request.metadata,
         )
         try:
-            result = self._generate_once(request, handle, path, body, start_ns, is_chat=is_chat)
+            result = self._generate_once(
+                request, handle, path, body, start_ns, is_chat=is_chat, selection=selection
+            )
         except ProviderError as exc:
             self._events.failed(
                 operation="generate",
@@ -910,6 +1156,8 @@ class LlamaCppProvider:
                 elapsed_ms=elapsed_ms(start_ns, self._monotonic()),
             )
             raise
+        finally:
+            lease.release()
         self._events.completed(
             operation="generate",
             model_name=request.identity.provider_model_name,
@@ -945,10 +1193,13 @@ class LlamaCppProvider:
             ProviderUnavailable: If the server could not be spawned or is unreachable.
             ProviderTimeout: If it does not answer in time.
         """
-        is_chat, path, body = self._build_request(request, stream=True)
+        is_chat, path = self._route(request)
         if request.cancel is not None and request.cancel.is_cancelled:
             return iter((self._already_cancelled(request),))
         handle = self._ensure_server(request)
+        selection = self._select_adapter(request, handle)
+        body = self._build_body(request, handle, is_chat=is_chat, stream=True, selection=selection)
+        lease = self._lease(handle)
         start_ns = self._monotonic()
         self._events.started(
             operation="stream",
@@ -961,6 +1212,7 @@ class LlamaCppProvider:
         try:
             response = self._client.send(prepared, stream=True)
         except httpx.HTTPError as exc:
+            lease.release()
             error = translate_transport_error(exc, base_url=handle.base_url)
             self._events.failed(
                 operation="stream",
@@ -977,6 +1229,7 @@ class LlamaCppProvider:
                 )
         except ProviderError as exc:
             response.close()
+            lease.release()
             self._events.failed(
                 operation="stream",
                 model_name=request.identity.provider_model_name,
@@ -987,8 +1240,21 @@ class LlamaCppProvider:
             raise
         except BaseException:
             response.close()
+            lease.release()
             raise
-        return self._walk(request, response, start_ns, handle, is_chat=is_chat)
+        events = self._walk(
+            request, response, start_ns, handle, is_chat=is_chat, selection=selection, lease=lease
+        )
+        # A caller may take the iterator and never start it — the response is already open, so the
+        # claim is already taken and `_walk`'s `finally` will never run to give it back. Releasing
+        # on collection is what keeps an abandoned stream from making a server un-restartable for
+        # the life of the process.
+        weakref.finalize(events, lease.release)
+        return events
+
+    def _lease(self, handle: ServerHandle) -> _InFlightLease:
+        """Claim the server for one request, so a restart waits rather than cuts in."""
+        return _InFlightLease(self._in_flight, self._lock, handle.model_name)
 
     # ----------------------------------------------------------------------- server control
 
@@ -1019,8 +1285,24 @@ class LlamaCppProvider:
             handle = self._supervisor.handle_for(entry.name)
             key = self._launch_key(entry, request.runtime_profile)
             if handle is not None and handle.launch_key != key:
+                # A **required** restart: this server was launched under different flags and
+                # cannot serve this profile at all (ADR-0023). It still waits for idle — killing a
+                # server another thread is streaming from would fail that request with a dropped
+                # connection, which looks like a server fault and is not one.
+                self._require_idle(entry.name, restart_reason="profile_change")
                 logger.debug(
                     "llamacpp.server.restart_for_profile",
+                    extra={"model_name": entry.name, "port": handle.port},
+                )
+                self._terminate(handle)
+                handle = None
+            if handle is not None and self._folds_in_at_idle(entry.name):
+                # A **deferred** restart: adapters arrived after this server started. This is the
+                # next natural idle, so take it now — one restart per newly registered adapter is
+                # the honest floor (ADR-0062 decision 3), and it is paid at a boundary between
+                # requests rather than inside one.
+                logger.debug(
+                    "llamacpp.server.restart_for_adapters",
                     extra={"model_name": entry.name, "port": handle.port},
                 )
                 self._terminate(handle)
@@ -1029,11 +1311,72 @@ class LlamaCppProvider:
                 handle = self._spawn(entry, request.identity, request.runtime_profile)
             return handle
 
+    def _require_idle(self, model_name: str, *, restart_reason: str) -> None:
+        """Refuse a restart that would cut into work in flight. Lock held.
+
+        Raises:
+            ProviderUnavailable: With reason ``restart_pending`` when another request is using
+                this server. Availability, not reliability (ADR-0067 rule 2): the subject is
+                unusable for a moment, and a router should stand it down rather than count a
+                failure against it.
+        """
+        in_flight = self._in_flight.get(model_name, 0)
+        if in_flight == 0:
+            return
+        raise ProviderUnavailable(
+            f"The server for {model_name!r} must restart before it can serve this request, and "
+            f"{in_flight} request(s) are still in flight against it. A restart never interrupts "
+            "work; retry when they finish.",
+            details={
+                "reason": ProviderUnavailableReason.RESTART_PENDING.value,
+                "restart_reason": restart_reason,
+                "model_name": model_name,
+                "in_flight": in_flight,
+            },
+        )
+
+    def _folds_in_at_idle(self, model_name: str) -> bool:
+        """Answer whether a running server should restart now to pick up new adapters. Lock held.
+
+        ``True`` only when the set this provider would launch with differs from what the server
+        actually reported registering **and** nothing is in flight. A busy server is left alone —
+        the pending adapters stay pending, which is what the state is for.
+        """
+        base = self._identities.get(model_name)
+        if base is None or self._in_flight.get(model_name, 0) > 0:
+            return False
+        wanted = tuple(
+            name
+            for name, verification in self._verify_all(base).items()
+            if verification.reason is None
+        )
+        registered = tuple(adapter.name for adapter in self._server_adapters.get(model_name, ()))
+        return wanted != registered
+
     def _spawn(
         self, entry: _Entry, identity: ModelIdentity, profile: RuntimeProfile
     ) -> ServerHandle:
         """Spawn a server for ``entry`` under ``profile``, reporting it as a ``load`` operation."""
         start_ns = self._monotonic()
+        served = identity_for(entry.name, self._digest_for(entry, refresh=False))
+        # Verified against the base actually being launched, before its argv exists — a manifest
+        # that names this base and disagrees about its digest never reaches the command line.
+        verifications = self._verify_all(served)
+        registered = tuple(
+            self._registrations[name]
+            for name, verification in verifications.items()
+            if verification.reason is None
+        )
+        for name, verification in verifications.items():
+            if verification.reason is not None:
+                logger.warning(
+                    "llamacpp.adapter.refused",
+                    extra={
+                        "model_name": entry.name,
+                        "adapter": name,
+                        "reason": verification.reason,
+                    },
+                )
         self._events.started(operation="load", model_name=entry.name, metadata={})
         try:
             handle = self._supervisor.spawn(
@@ -1044,6 +1387,7 @@ class LlamaCppProvider:
                     alias=entry.name,
                     port=port,
                     profile=profile,
+                    adapter_paths=[item.artifact_path for item in registered],
                 ),
                 probe=self._probe,
                 launch_key=self._launch_key(entry, profile),
@@ -1057,12 +1401,10 @@ class LlamaCppProvider:
                 elapsed_ms=elapsed_ms(start_ns, self._monotonic()),
             )
             raise
-        self._identities[entry.name] = (
-            identity
-            if identity.artifact_digest is not None
-            else identity_for(entry.name, self._digest_for(entry, refresh=False))
-        )
+        self._identities[entry.name] = identity if identity.artifact_digest is not None else served
+        self._verifications[entry.name] = verifications
         self._read_props(handle)
+        self._server_adapters[entry.name] = self._read_registered_adapters(handle, registered)
         self._events.completed(
             operation="load",
             model_name=entry.name,
@@ -1072,16 +1414,27 @@ class LlamaCppProvider:
         return handle
 
     def _terminate(self, handle: ServerHandle) -> None:
-        """Stop a server and forget its identity."""
+        """Stop a server and forget everything that was true only while it ran."""
         self._supervisor.terminate(handle)
-        self._identities.pop(handle.model_name, None)
+        self._forget(handle.model_name)
 
     def _reap(self) -> tuple[tuple[ServerHandle, int], ...]:
         """Drop servers that exited on their own, forgetting their identities."""
         exited = self._supervisor.reap_exited()
         for handle, _code in exited:
-            self._identities.pop(handle.model_name, None)
+            self._forget(handle.model_name)
         return exited
+
+    def _forget(self, model_name: str) -> None:
+        """Drop the per-server state a stopped server's answers were derived from.
+
+        The adapter states go with it: a registration that was ``registered`` on a server that is
+        no longer running is ``awaiting_base``, and reporting it as registered would name a
+        server id nothing will honour.
+        """
+        self._identities.pop(model_name, None)
+        self._server_adapters.pop(model_name, None)
+        self._verifications.pop(model_name, None)
 
     def _launch_key(self, entry: _Entry, profile: RuntimeProfile) -> str:
         """What decides whether a running server can serve a profile: the file and the flags."""
@@ -1109,6 +1462,35 @@ class LlamaCppProvider:
         if isinstance(props, dict):
             handle.build_info = read_build_info(props)
             handle.served_context = read_served_context(props)
+
+    def _read_registered_adapters(
+        self, handle: ServerHandle, launched: Sequence[AdapterRegistration]
+    ) -> tuple[ServerAdapter, ...]:
+        """Ask the server which adapters it registered, and under which ids.
+
+        Read back rather than inferred from argv order: the id in a request's ``lora`` field is
+        the server's own index, and assuming it would put a wrong-adapter bug — the kind that
+        produces plausible, confident, wrong output — one refactor away. An adapter the server
+        does not report is left out, so it shows as pending rather than as selectable.
+
+        Returns:
+            The registered adapters in server-id order, or ``()`` when none were launched or the
+            endpoint could not be read (logged, never raised: a server that answers ``/health``
+            and ``/props`` but not this is still usable for the bare base).
+        """
+        if not launched:
+            return ()
+        try:
+            payload = self._get_json(handle, _LORA_PATH)
+        except ProviderError as exc:
+            logger.warning(
+                "llamacpp.lora_adapters.unreadable",
+                extra={"model_name": handle.model_name, "port": handle.port, "code": exc.code},
+            )
+            return ()
+        return read_lora_adapters(
+            payload, by_path={str(item.artifact_path): item.name for item in launched}
+        )
 
     def _resolved_server_path(self) -> str | None:
         """Return the executable this adapter would launch, or ``None`` if it cannot be found."""
@@ -1257,10 +1639,25 @@ class LlamaCppProvider:
 
     # ------------------------------------------------------------------------- generation
 
-    def _build_request(
-        self, request: GenerationRequest, *, stream: bool
-    ) -> tuple[bool, str, dict[str, Any]]:
-        """Choose the endpoint and build its body: ``(is_chat, path, body)``."""
+    def _route(self, request: GenerationRequest) -> tuple[bool, str]:
+        """Validate the request's shape and choose its endpoint: ``(is_chat, path)``.
+
+        Everything here is decidable from the request alone, so it runs **before** a server is
+        spawned and before a cancellation token is consulted: a request naming something this
+        adapter refuses is malformed whichever way the token points, and reporting it as a
+        cancellation would hide the caller's own bug.
+
+        Raises:
+            CapabilityUnsupported: If ``prompt`` is combined with ``tools`` — the native endpoint
+                has no concept of tools, and dropping them silently is what ADR-0007 rule 2
+                forbids.
+            ProviderRejected: If ``provider_options`` carries the adapter selection itself
+                (``lora``), a slot pin, or a ``--lora`` launch flag. Each would change what the
+                weights do, or which cache answers, without changing the subject this adapter
+                records — the fabricated comparability ADR-0058 exists to prevent. The supported
+                channel is :attr:`~modelrack.types.GenerationRequest.adapter`.
+        """
+        self._refuse_smuggled_options(request)
         if request.prompt is not None:
             if request.tools:
                 raise CapabilityUnsupported(
@@ -1268,12 +1665,132 @@ class LlamaCppProvider:
                     "use messages instead of prompt to call one.",
                     details={"capability": "tool_calling"},
                 )
-            return False, _COMPLETION_PATH, build_completion_body(request, stream=stream)
-        return (
-            True,
-            _CHAT_PATH,
-            build_chat_body(request, alias=request.identity.provider_model_name, stream=stream),
-        )
+            return False, _COMPLETION_PATH
+        return True, _CHAT_PATH
+
+    @staticmethod
+    def _refuse_smuggled_options(request: GenerationRequest) -> None:
+        """Refuse a ``provider_options`` entry that would move the subject behind this adapter."""
+        options = request.runtime_profile.provider_options
+        for key in sorted(options):
+            if key in FORBIDDEN_REQUEST_KEYS:
+                raise ProviderRejected(
+                    f"provider_options[{key!r}] selects a LoRA adapter directly. That would run "
+                    "different weights than the recorded subject names, so the result could not "
+                    "be attributed. Use GenerationRequest.adapter, which this adapter resolves, "
+                    "verifies against the served base and reports back on the result.",
+                    details={"status_code": 0, "provider_message": f"forbidden option {key!r}"},
+                )
+            if key in SLOT_PINNING_KEYS:
+                raise ProviderRejected(
+                    f"provider_options[{key!r}] pins this request to one of the server's slots, "
+                    "and so to that slot's prompt cache. Slot choice is the server's, because "
+                    "that is what lets it clear a cache built under a different adapter; pinning "
+                    "reaches past that rule (ADR-0062 decision 4).",
+                    details={"status_code": 0, "provider_message": f"forbidden option {key!r}"},
+                )
+            if key in FORBIDDEN_LAUNCH_FLAGS:
+                raise ProviderRejected(
+                    f"provider_options[{key!r}] would register a LoRA adapter behind this "
+                    "adapter's back: it would have no digest, no verified base and no name a "
+                    "result could report. Register adapters through register_adapters(), which "
+                    "verifies the base first.",
+                    details={"status_code": 0, "provider_message": f"forbidden option {key!r}"},
+                )
+
+    def _select_adapter(
+        self, request: GenerationRequest, handle: ServerHandle
+    ) -> _Selection | None:
+        """Resolve ``request.adapter`` against what the serving process actually registered.
+
+        Returns:
+            ``None`` when the request names no adapter — the bare-base subject, unchanged from
+            before the adapter axis existed — else the selection the result will report.
+
+        Raises:
+            AdapterNotFound: If the name was never registered with this provider (``reason``
+                ``unknown``), or was **refused** for this base at launch (``reason``
+                ``incompatible_base``, with both digests). Never a bare-base generation: that
+                would answer with a different subject than the caller asked for and say nothing
+                (ADR-0062 decision 4).
+            ProviderUnavailable: With reason ``restart_pending`` if the adapter is compatible but
+                its base's server was launched before it was registered and work is in flight, so
+                the restart that would fold it in cannot be taken yet.
+        """
+        name = request.adapter
+        if name is None:
+            return None
+        with self._lock:
+            known = list(self._registrations)
+            registration = self._registrations.get(name)
+            if registration is None:
+                raise AdapterNotFound(
+                    f"No adapter named {name!r} is registered with this provider.",
+                    details={"adapter": name, "registered": known, "reason": "unknown"},
+                )
+            base = self._identities[handle.model_name]
+            registered = self._server_adapters.get(handle.model_name, ())
+            # What the launch decided, where this adapter existed then; otherwise what it would
+            # decide now — an adapter registered after the server started has no launch verdict,
+            # and refusing it as "another base's" would be wrong as well as unhelpful.
+            verification = self._verifications.get(handle.model_name, {}).get(name)
+            if verification is None:
+                verification = self._verify(registration, base)
+            if verification is None or verification.reason is not None:
+                raise AdapterNotFound(
+                    f"Adapter {name!r} cannot be applied to the base this server is running "
+                    f"({handle.model_name!r}): "
+                    + (
+                        verification.reason
+                        if verification is not None and verification.reason is not None
+                        else (
+                            f"it declares base {registration.base_model_name!r}. An adapter "
+                            "applies to the base it was trained on and to nothing else."
+                        )
+                    ),
+                    details={
+                        "adapter": name,
+                        "registered": known,
+                        "reason": "incompatible_base",
+                        "declared_base_digest": registration.base_artifact_digest,
+                        "served_base_digest": base.artifact_digest,
+                    },
+                )
+            if not any(adapter.name == name for adapter in registered):
+                # Compatible, but this server was launched without it. It folds in at an idle,
+                # and until then the honest answer is "not yet", never the bare base.
+                self._require_idle(handle.model_name, restart_reason="adapter_registration")
+                raise AdapterNotFound(  # pragma: no cover — an idle server has already folded in
+                    f"Adapter {name!r} is registered but the running server did not load it.",
+                    details={"adapter": name, "registered": known, "reason": "unknown"},
+                )
+            return _Selection(
+                name=name,
+                identity=registration.identity,
+                confidence=verification.confidence or IdentityConfidence.NAME_ONLY,
+            )
+
+    def _build_body(
+        self,
+        request: GenerationRequest,
+        handle: ServerHandle,
+        *,
+        is_chat: bool,
+        stream: bool,
+        selection: _Selection | None,
+    ) -> dict[str, Any]:
+        """Build the request body, stating the whole adapter configuration where there is one."""
+        with self._lock:
+            registered = self._server_adapters.get(handle.model_name, ())
+        lora = lora_field(registered, selected=selection.name if selection else None)
+        if is_chat:
+            return build_chat_body(
+                request,
+                alias=request.identity.provider_model_name,
+                stream=stream,
+                lora=lora,
+            )
+        return build_completion_body(request, stream=stream, lora=lora)
 
     def _generate_once(
         self,
@@ -1284,6 +1801,7 @@ class LlamaCppProvider:
         start_ns: int,
         *,
         is_chat: bool,
+        selection: _Selection | None = None,
     ) -> GenerationResult:
         """Run the round trip :meth:`generate` wraps in its event pair."""
         payload = self._post_json(
@@ -1333,6 +1851,8 @@ class LlamaCppProvider:
                     if isinstance(fingerprint, str) and fingerprint
                     else handle.build_info
                 ),
+                adapter=selection.identity if selection is not None else None,
+                adapter_base_confidence=selection.confidence if selection is not None else None,
                 raw=dict(payload),
             )
         content = payload.get("content")
@@ -1345,6 +1865,8 @@ class LlamaCppProvider:
             timing=self._timing(payload, client_wall_ms=wall_ms, client_ttft_ms=UNSUPPORTED),
             thinking=UNSUPPORTED,
             provider_version=handle.build_info,
+            adapter=selection.identity if selection is not None else None,
+            adapter_base_confidence=selection.confidence if selection is not None else None,
             raw=dict(payload),
         )
 
@@ -1389,6 +1911,8 @@ class LlamaCppProvider:
         handle: ServerHandle,
         *,
         is_chat: bool,
+        selection: _Selection | None = None,
+        lease: _InFlightLease | None = None,
     ) -> Iterator[StreamEvent]:
         """Observe every event :meth:`_drain` produces, then hand it on unchanged.
 
@@ -1396,13 +1920,17 @@ class LlamaCppProvider:
         one wrapper and why the inner generator is closed explicitly in ``finally``.
         """
         model_name = request.identity.provider_model_name
-        events = self._drain(request, response, start_ns, handle, is_chat=is_chat)
+        events = self._drain(
+            request, response, start_ns, handle, is_chat=is_chat, selection=selection
+        )
         try:
             for event in events:
                 self._observe(event, request, start_ns, model_name)
                 yield event
         finally:
             events.close()
+            if lease is not None:
+                lease.release()
 
     def _observe(
         self, event: StreamEvent, request: GenerationRequest, start_ns: int, model_name: str
@@ -1444,6 +1972,7 @@ class LlamaCppProvider:
         handle: ServerHandle,
         *,
         is_chat: bool,
+        selection: _Selection | None = None,
     ) -> Generator[StreamEvent, None, None]:
         """Drain one SSE stream, owning ``response`` for its entire remaining lifetime.
 
@@ -1626,6 +2155,10 @@ class LlamaCppProvider:
                     tool_calls=tool_calls,
                     thinking=thinking.getvalue() if saw_thinking else UNSUPPORTED,
                     provider_version=fingerprint or handle.build_info,
+                    adapter=selection.identity if selection is not None else None,
+                    adapter_base_confidence=(
+                        selection.confidence if selection is not None else None
+                    ),
                     raw={key: dict(value) for key, value in terminal.items()},
                 )
             else:
@@ -1637,6 +2170,10 @@ class LlamaCppProvider:
                     timing=self._timing(terminal, client_wall_ms=wall_ms, client_ttft_ms=ttft_ms),
                     thinking=UNSUPPORTED,
                     provider_version=handle.build_info,
+                    adapter=selection.identity if selection is not None else None,
+                    adapter_base_confidence=(
+                        selection.confidence if selection is not None else None
+                    ),
                     raw=dict(terminal),
                 )
             yield StreamCompleted(result=result)
