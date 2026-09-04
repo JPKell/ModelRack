@@ -42,28 +42,42 @@ import json
 import random
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
 import respx
-from baseaicore import DataClassification, ModelIdentity, ProviderKind
+from baseaicore import DataClassification, ModelIdentity, ProviderKind, RuntimeProfile
 
 from conftest import FakeLauncher, FakeMonotonic, FakeProcessTable, FakeSleep
-from modelrack import AdapterRegistration, GenerationRequest, Message, Role
-from modelrack.providers._llamacpp_wire import SLOT_PINNING_KEYS
+from modelrack import (
+    AdapterRegistration,
+    GenerationRequest,
+    Message,
+    ResponseFormat,
+    ResponseFormatKind,
+    Role,
+    SamplingParameters,
+    ToolDefinition,
+)
+from modelrack.providers._llamacpp_wire import (
+    SLOT_PINNING_KEYS,
+    build_chat_body,
+    build_completion_body,
+)
 from modelrack.providers.llamacpp import LlamaCppProvider
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping, Sequence
     from datetime import datetime
-    from pathlib import Path
 
 pytestmark = pytest.mark.contract
 
 _PORT = 18280
 _MODEL = "qwen3.5-9b-q8_0"
 _ADAPTERS = ("factcheck", "house-voice", "summarize")
+_GOLDEN_MODEL = "qwen3.5-9b-q8_0"
 
 
 # ------------------------------------------------------------------------------ the property
@@ -467,3 +481,111 @@ class TestThePropertyCanFail:
 
         with pytest.raises(AssertionError, match="must send no `lora` key"):
             assert_adapter_isolation(exchanges, registered={})
+
+
+class TestTheAdapterFreeBodyIsByteForByteWhatItWas:
+    """A-1's invariant, asserted against a **golden captured from the Phase 6 code itself**.
+
+    ``tests/fixtures/providers/llamacpp/phase6_request_bodies.json`` was produced by running
+    ``build_chat_body`` and ``build_completion_body`` as they stood at the commit before adapters
+    existed, over four requests chosen to touch every branch either function has: bare and fully
+    loaded, chat and completion, streamed and not, with tools, a JSON mode, a JSON schema, every
+    sampling field and both kinds of ``provider_options`` entry.
+
+    Field assertions elsewhere check that the right values are present. This checks that **nothing
+    else moved** — no key added, none dropped, none renamed, no value nudged — which is the only
+    form in which "byte-for-byte what it was" is a claim rather than a hope. A deployment that has
+    never heard of adapters sends exactly the bytes it sent before this phase.
+    """
+
+    @staticmethod
+    def _load() -> dict[str, dict[str, Any]]:
+        path = (
+            Path(__file__).resolve().parents[1]
+            / "fixtures"
+            / "providers"
+            / "llamacpp"
+            / "phase6_request_bodies.json"
+        )
+        loaded: dict[str, dict[str, Any]] = json.loads(path.read_text())
+        return loaded
+
+    @staticmethod
+    def _rebuild(name: str) -> dict[str, Any]:
+        identity = ModelIdentity(ProviderKind.LLAMACPP, _GOLDEN_MODEL)
+        tool = ToolDefinition(
+            name="get_weather",
+            description="Weather.",
+            parameters={"type": "object", "properties": {"city": {"type": "string"}}},
+        )
+        sampling = SamplingParameters(
+            temperature=0.1,
+            top_p=0.9,
+            top_k=20,
+            seed=3,
+            max_output_tokens=64,
+            stop=("STOP",),
+            repeat_penalty=1.1,
+        )
+        profile = RuntimeProfile(
+            context_size=4096, gpu_layers=99, provider_options={"min_p": 0.05, "--parallel": 1}
+        )
+        message = (Message(role=Role.USER, content="Explain KV caching."),)
+        if name == "chat_plain":
+            return build_chat_body(
+                GenerationRequest(identity=identity, messages=message),
+                alias=_GOLDEN_MODEL,
+                stream=False,
+            )
+        if name == "chat_full":
+            return build_chat_body(
+                GenerationRequest(
+                    identity=identity,
+                    messages=message,
+                    sampling=sampling,
+                    tools=(tool,),
+                    runtime_profile=profile,
+                    response_format=ResponseFormat(kind=ResponseFormatKind.JSON),
+                ),
+                alias=_GOLDEN_MODEL,
+                stream=True,
+            )
+        if name == "completion_plain":
+            return build_completion_body(
+                GenerationRequest(identity=identity, prompt="Explain KV caching."), stream=False
+            )
+        return build_completion_body(
+            GenerationRequest(
+                identity=identity,
+                prompt="Explain KV caching.",
+                sampling=sampling,
+                runtime_profile=profile,
+                response_format=ResponseFormat(
+                    kind=ResponseFormatKind.JSON_SCHEMA,
+                    schema={"type": "object", "properties": {"answer": {"type": "string"}}},
+                ),
+            ),
+            stream=True,
+        )
+
+    @pytest.mark.parametrize(
+        "name", ["chat_plain", "chat_full", "completion_plain", "completion_full"]
+    )
+    def test_the_body_is_identical_to_the_phase_6_golden(self, name: str) -> None:
+        golden = self._load()[name]
+
+        rebuilt = self._rebuild(name)
+
+        assert json.dumps(rebuilt, sort_keys=True) == json.dumps(golden, sort_keys=True), (
+            f"{name}: the adapter-free request body is no longer what Phase 6 sent. A deployment "
+            "with no adapters must be byte-for-byte unaffected by the adapter axis (ADR-0058)."
+        )
+
+    def test_the_golden_covers_both_endpoints_and_both_streaming_modes(self) -> None:
+        """A golden that only covered the bare cases would pass while the loaded ones drifted."""
+        golden = self._load()
+
+        assert {"chat_plain", "chat_full", "completion_plain", "completion_full"} == set(golden)
+        assert golden["chat_full"]["stream"] is True
+        assert golden["completion_full"]["stream"] is True
+        assert all("lora" not in body for body in golden.values())

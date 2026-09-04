@@ -1,0 +1,81 @@
+{
+  "chat_full": {
+    "max_tokens": 64,
+    "messages": [
+      {
+        "content": "Explain KV caching.",
+        "role": "user"
+      }
+    ],
+    "min_p": 0.05,
+    "model": "qwen3.5-9b-q8_0",
+    "repeat_penalty": 1.1,
+    "response_format": {
+      "type": "json_object"
+    },
+    "seed": 3,
+    "stop": [
+      "STOP"
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "temperature": 0.1,
+    "tools": [
+      {
+        "function": {
+          "description": "Weather.",
+          "name": "get_weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "function"
+      }
+    ],
+    "top_k": 20,
+    "top_p": 0.9
+  },
+  "chat_plain": {
+    "messages": [
+      {
+        "content": "Explain KV caching.",
+        "role": "user"
+      }
+    ],
+    "model": "qwen3.5-9b-q8_0",
+    "stream": false
+  },
+  "completion_full": {
+    "json_schema": {
+      "properties": {
+        "answer": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "min_p": 0.05,
+    "n_predict": 64,
+    "prompt": "Explain KV caching.",
+    "repeat_penalty": 1.1,
+    "seed": 3,
+    "stop": [
+      "STOP"
+    ],
+    "stream": true,
+    "temperature": 0.1,
+    "top_k": 20,
+    "top_p": 0.9
+  },
+  "completion_plain": {
+    "prompt": "Explain KV caching.",
+    "stream": false
+  }
+}
