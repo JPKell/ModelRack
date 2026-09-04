@@ -269,8 +269,10 @@ written to it rather than retrofitted.
   through `load()`, `unload()` and `list_resident()`, the `Provider` protocol unchanged.
 * GGUF discovery and hashing from a configured model directory: header parsing for descriptors;
   the sha256 of the served artifact as the identity (identity confidence *bound*, better than
-  tag-based); the digest cached by path and file stamp with an explicit `refresh=True` path,
-  never substituted by a cheaper hash.
+  tag-based); the digest keyed by path and file stamp, persisted in `<state_dir>/digests.json`
+  ([ADR-0071](../../adr/0071-modelrack-persists-artifact-digests-in-a-json-file-the-application-names.md))
+  with an explicit `refresh=True` path and a `clear_digest_cache()`, never substituted by a
+  cheaper hash.
 * Profile flags: `n_gpu_layers`, KV cache types, flash attention, context size, threads, batch
   size; a chat-template override through `provider_options`.
 * Generation and streaming over the server's native API — `/completion` for prompts, the chat
@@ -333,8 +335,8 @@ tests/live/test_llamacpp_live.py               # marked
 named in the adapter roadmap and each mitigated above. The live journey cannot run on a machine
 without llama.cpp; it is an operator step on LA1's critical path.
 **Likely failure modes:** reading `tokens_cached` as cached input (it is the whole cache);
-hashing 40 GB on every discovery call (mitigated by the stamp-keyed digest store and the
-persistent store an application may inject); a profile served by a server launched under
+hashing 40 GB on every discovery call (mitigated by the stamp-keyed, persisted digest file —
+ADR-0071); a profile served by a server launched under
 different flags (mitigated by comparing launch flags, not profile hashes).
 **Gold standards:** one client for the whole suite; typed errors; unsupported-safe measurement;
 no leaked processes; digest-bound identity.

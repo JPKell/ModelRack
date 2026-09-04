@@ -28,19 +28,18 @@ decision 6 names — and a request pinned to a digest that no longer matches the
 is refused with :class:`~modelrack.errors.ModelNotFound` rather than served from different weights.
 
 **What a digest costs, and the decision about it.** Hashing a 9 GB file takes seconds to tens of
-seconds; hashing the reference machine's directory takes minutes. The header a descriptor is
+seconds; hashing the reference machine's directory takes about 45 s. The header a descriptor is
 built from is cached the way every adapter's metadata is — the in-memory
 :class:`~modelrack.cache.MetadataCache`, its TTL, and ``refresh=True`` — and additionally
 checked against the file's :class:`~modelrack.providers._gguf.ArtifactStamp` on every hit, so a
 replaced file is never described from its predecessor's header. The digest is **not** on a TTL:
 a content hash does not go stale with time, only with content, so it is keyed by path *and*
 stamp in a :class:`DigestStore` and recomputed when the stamp changes or ``refresh=True`` says
-so. The default store is in-memory, which keeps this package inside spec §3 ("no persistence")
-and §10 ("never survives the process") and means **the first discovery in each process hashes
-every file in the directory**. An application that cannot afford that on every start injects a
-store that persists in its own data root; this package ships none, because a package-owned
-cache file is a persistence decision the spec has not made. Nothing here substitutes a cheaper
-digest for the content digest the identity contract names.
+so. The default store is :class:`JsonFileDigestStore`, one versioned JSON file inside the
+application-named ``state_dir`` (ADR-0071): the first discovery against a fresh ``state_dir``
+hashes every file once, and every process after that pays a ``stat`` per file. It is clearable
+through :meth:`LlamaCppProvider.clear_digest_cache` or by deleting the file; nothing here
+substitutes a cheaper digest for the content digest the identity contract names.
 
 **Usage is read to ADR-0070 from the first commit** — see :mod:`_llamacpp_wire`'s docstring for
 the three cases, and for the ``tokens_cached`` trap that module exists to avoid.
@@ -50,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import threading
 import time
@@ -182,6 +182,7 @@ __all__ = [
     "DEFAULT_STARTUP_TIMEOUT_SECONDS",
     "DigestStore",
     "InMemoryDigestStore",
+    "JsonFileDigestStore",
     "LaunchSpec",
     "LlamaCppProvider",
     "PosixProcessTable",
@@ -241,16 +242,21 @@ class DigestStore(Protocol):
     so a store never has to decide whether an entry is stale: a changed file has a different key
     and simply misses. A store may forget anything at any time; the only cost is a re-hash.
 
-    The default is :class:`InMemoryDigestStore`. An application that persists digests supplies a
-    store backed by its own data root — never a file this package chooses (spec §3, §10, §12).
+    The default is :class:`JsonFileDigestStore` over ``<state_dir>/digests.json`` (ADR-0071);
+    :class:`InMemoryDigestStore` is the no-persistence alternative, and an application may inject
+    any other implementation backed by its own data root.
     """
 
     def get(self, key: str) -> str | None:
         """Return the digest stored under ``key``, or ``None``."""
         ...
 
-    def put(self, key: str, digest: str) -> None:
-        """Store ``digest`` under ``key``."""
+    def put(self, key: str, digest: str, *, path: Path) -> None:
+        """Store ``digest`` under ``key``, for the file at ``path``."""
+        ...
+
+    def clear(self) -> None:
+        """Forget every digest, so the next discovery hashes again."""
         ...
 
 
@@ -274,8 +280,8 @@ class InMemoryDigestStore:
         with self._lock:
             return self._entries.get(key)
 
-    def put(self, key: str, digest: str) -> None:
-        """Store ``digest`` under ``key``, replacing any earlier value."""
+    def put(self, key: str, digest: str, *, path: Path) -> None:
+        """Store ``digest`` under ``key``, replacing any earlier value. ``path`` is not used."""
         with self._lock:
             self._entries[key] = digest
 
@@ -288,6 +294,120 @@ class InMemoryDigestStore:
         """Return how many digests are held."""
         with self._lock:
             return len(self._entries)
+
+
+_DIGEST_FILE_VERSION: Final[int] = 1
+_DIGEST_FILE_NAME: Final[str] = "digests.json"
+
+
+class JsonFileDigestStore:
+    """The default :class:`DigestStore`: one versioned JSON file in the application's ``state_dir``.
+
+    ADR-0071's decision, as code. A content digest is invalidated by the file's bytes changing —
+    which the key's stamp captures — and by nothing else, so holding it only in memory would
+    re-pay seconds to a minute of hashing on every process start for no information gained.
+
+    Every write reads the current file, merges the new entry, drops entries whose ``path`` no
+    longer exists, and replaces the file through a temporary sibling and :func:`os.replace`, so
+    two processes writing the same file cannot corrupt it and a race costs at most one re-hash.
+    An unreadable or differently versioned file is treated as empty, logged at DEBUG, and
+    overwritten on the next write: it is a cache, and nothing may fail because of it.
+
+    Args:
+        path: The file. Its directory is created on the first write. ``<state_dir>/digests.json``
+            when the adapter builds it.
+        clock: Where each entry's ``computed_at`` comes from, for a human reading the file.
+    """
+
+    __slots__ = ("_clock", "_lock", "_path")
+
+    def __init__(self, path: Path, *, clock: Callable[[], datetime] = utc_now) -> None:
+        """Bind to a file; nothing is read or written until asked."""
+        self._path = path
+        self._clock = clock
+        self._lock = threading.Lock()
+
+    @property
+    def path(self) -> Path:
+        """Where the digests live."""
+        return self._path
+
+    def get(self, key: str) -> str | None:
+        """Return the digest stored under ``key``, or ``None``."""
+        with self._lock:
+            entry = self._read().get(key)
+        if not isinstance(entry, dict):
+            return None
+        digest = entry.get("digest")
+        return digest if isinstance(digest, str) and digest else None
+
+    def put(self, key: str, digest: str, *, path: Path) -> None:
+        """Merge ``digest`` for ``path`` into the file, atomically, pruning entries for files
+        that no longer exist.
+        """
+        with self._lock:
+            entries = self._read()
+            entries[key] = {
+                "path": str(path),
+                "digest": digest,
+                "computed_at": self._clock().isoformat(),
+            }
+            kept = {
+                stored_key: entry
+                for stored_key, entry in entries.items()
+                if isinstance(entry, dict)
+                and isinstance(entry.get("path"), str)
+                and Path(entry["path"]).exists()
+            }
+            self._write(kept)
+
+    def clear(self) -> None:
+        """Remove the file. The next discovery hashes every file again."""
+        with self._lock:
+            try:
+                self._path.unlink()
+            except FileNotFoundError:
+                return
+
+    def __len__(self) -> int:
+        """Return how many digests the file currently holds."""
+        with self._lock:
+            return len(self._read())
+
+    def _read(self) -> dict[str, Any]:
+        """Return the file's entries, or an empty mapping for an absent, unreadable or
+        differently versioned file.
+        """
+        try:
+            payload = json.loads(self._path.read_text())
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            logger.debug(
+                "llamacpp.digests.unreadable", extra={"path": str(self._path), "error": str(exc)}
+            )
+            return {}
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != _DIGEST_FILE_VERSION
+            or not isinstance(payload.get("entries"), dict)
+        ):
+            logger.debug("llamacpp.digests.unrecognised", extra={"path": str(self._path)})
+            return {}
+        entries: dict[str, Any] = payload["entries"]
+        return entries
+
+    def _write(self, entries: dict[str, Any]) -> None:
+        """Replace the file atomically with ``entries``."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps(
+                {"version": _DIGEST_FILE_VERSION, "entries": entries}, indent=2, sort_keys=True
+            )
+            + "\n"
+        )
+        temporary.replace(self._path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,8 +473,10 @@ class LlamaCppProvider:
             (spec §10, default 300 s). ``0`` disables the header cache. Every hit is also checked
             against the file's stamp, so the TTL bounds staleness of nothing but the header's
             contents for an unchanged file. Residency and health are never cached.
-        digest_store: Where content digests are kept, keyed by path and stamp. Defaults to an
-            in-memory store; see the module docstring for what that costs and why.
+        digest_store: Where content digests are kept, keyed by path and stamp. Defaults to a
+            :class:`JsonFileDigestStore` over ``<state_dir>/digests.json`` (ADR-0071), so a
+            directory is hashed once per ``state_dir`` rather than once per process; pass an
+            :class:`InMemoryDigestStore` for no persistence.
         on_event: An optional observer called as requests start, stream and finish, and as
             servers are loaded (spec §17). Receives no prompt, no generated text and no path.
         clock: Where a descriptor's ``observed_at`` and a handle's ``started_at`` come from.
@@ -416,7 +538,9 @@ class LlamaCppProvider:
             ttl_seconds=metadata_ttl_seconds
         )
         self._digests: DigestStore = (
-            digest_store if digest_store is not None else InMemoryDigestStore()
+            digest_store
+            if digest_store is not None
+            else JsonFileDigestStore(Path(state_dir) / _DIGEST_FILE_NAME, clock=clock)
         )
         self._events = EventEmitter(on_event, provider_kind=self.kind)
         self._supervisor = LlamaServerSupervisor(
@@ -531,9 +655,18 @@ class LlamaCppProvider:
 
     def clear_metadata_cache(self) -> None:
         """Drop every cached header. Digests are keyed by content stamp and are not affected;
-        pass ``refresh=True`` to any discovery method to re-hash a file whose stamp is unchanged.
+        see :meth:`clear_digest_cache`, or pass ``refresh=True`` to any discovery method to
+        re-hash a file whose stamp is unchanged.
         """
         self._headers.clear()
+
+    def clear_digest_cache(self) -> None:
+        """Forget every computed digest, so the next discovery hashes every file again.
+
+        For the default store this removes ``<state_dir>/digests.json`` (ADR-0071); deleting
+        that file by hand is equally safe.
+        """
+        self._digests.clear()
 
     @property
     def model_directory(self) -> Path:
@@ -1053,7 +1186,7 @@ class LlamaCppProvider:
             extra={"path": str(entry.path), "size_bytes": entry.header.stamp.size_bytes},
         )
         digest = sha256_of_file(entry.path)
-        self._digests.put(key, digest)
+        self._digests.put(key, digest, path=entry.path)
         return digest
 
     def _describe(self, entry: _Entry, *, refresh: bool) -> ModelDescriptor:

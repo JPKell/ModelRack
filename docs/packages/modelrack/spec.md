@@ -36,7 +36,10 @@ timing means.
   writes pid files and captured stderr under a `state_dir` the application names inside its own
   data root, so a server orphaned by a crashed process can be recovered by the next one
   ([ADR-0062](../../adr/0062-llamacpp-serves-adapters-through-a-supervised-process.md)
-  decision 6). It is supervision state, never a cache and never model data.
+  decision 6), and one versioned `digests.json` of computed artifact digests beside them
+  ([ADR-0071](../../adr/0071-modelrack-persists-artifact-digests-in-a-json-file-the-application-names.md)),
+  because a content hash is invalidated by content changing and never by a process ending. Never
+  model data; the digest file is clearable and safe to delete.
 * No prompt construction or templating.
 * No queueing, no concurrency control, no rate limiting (callers own their concurrency policy).
 * No model downloading, conversion or quantization.
@@ -156,8 +159,9 @@ optional in-memory metadata cache (default TTL 300 s) is explicitly documented, 
 clearable; it never survives the process. Generation results are never cached, and neither are
 residency or health — both are live state whose stale answer is worse than no answer.
 `LlamaCppProvider`'s content digests are keyed by path and file stamp in an injectable
-`DigestStore`, in-memory by default; an application that persists them does so in its own data
-root, never through a file this package chooses.
+`DigestStore`, by default a versioned `<state_dir>/digests.json` written atomically and pruned of
+files that no longer exist (ADR-0071); `clear_digest_cache()` removes it, and so may an operator.
+An in-memory store remains available for a caller that wants no persistence.
 
 Because a tag can be repointed at any moment, a TTL alone cannot make a cached digest trustworthy.
 Every metadata read therefore takes a keyword-only `refresh: bool = False`, the explicit bypass a
@@ -199,7 +203,8 @@ Constructor arguments only — base URL, timeouts (connect/read/total), headers,
 `httpx.Client`, cache TTL, `verify` for TLS. ModelRack reads no environment variable and no
 configuration file; the application owns configuration. `LlamaCppProvider` reads GGUF files under
 an application-supplied `model_directory` and spawns `llama-server` through an injected launcher
-(ADR-0062); both directories it touches are named by the application.
+(ADR-0062); both directories it touches are named by the application, and its digest file lives
+in the second (ADR-0071).
 
 ## 13. Error behaviour
 

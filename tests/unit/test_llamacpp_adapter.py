@@ -66,7 +66,12 @@ from modelrack import (
     ToolCallDelta,
     ToolDefinition,
 )
-from modelrack.providers.llamacpp import InMemoryDigestStore, LlamaCppProvider
+from modelrack.providers._gguf import sha256_of_file
+from modelrack.providers.llamacpp import (
+    InMemoryDigestStore,
+    JsonFileDigestStore,
+    LlamaCppProvider,
+)
 from modelrack.streaming import CancellationToken
 
 if TYPE_CHECKING:
@@ -343,6 +348,7 @@ class TestConstructionAndHealth:
         assert "no server running" in health.detail
         assert "2 models, 0 resident" in health.detail
         assert len(store) == 0, "a health probe must never pay for a content digest"
+        assert not (instance.supervisor.state_dir / "digests.json").exists()
 
     def test_health_with_a_running_server_reports_its_build(
         self, provider: LlamaCppProvider, server: _FakeServer
@@ -463,6 +469,52 @@ class TestDiscovery:
         instance.list_models(refresh=True)
         assert store.puts == 4
 
+    def test_the_default_store_persists_digests_across_provider_instances(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ADR-0071: a directory is hashed once per state_dir, not once per process."""
+        hashed: list[Path] = []
+        real = sha256_of_file
+
+        def counting(path: Path) -> str:
+            hashed.append(path)
+            return real(path)
+
+        monkeypatch.setattr("modelrack.providers.llamacpp.sha256_of_file", counting)
+        first = make_provider()
+        first.list_models()
+        assert len(hashed) == 2
+        assert (tmp_path / "state" / "digests.json").exists()
+
+        second = make_provider()
+        second.list_models()
+
+        assert len(hashed) == 2, "the second instance read the file instead of hashing"
+        assert second.resolve(_MODEL) == first.resolve(_MODEL)
+
+    def test_clear_digest_cache_removes_the_file_and_forces_a_rehash(
+        self, provider: LlamaCppProvider, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        hashed: list[Path] = []
+        real = sha256_of_file
+
+        def counting(path: Path) -> str:
+            hashed.append(path)
+            return real(path)
+
+        monkeypatch.setattr("modelrack.providers.llamacpp.sha256_of_file", counting)
+        provider.resolve(_MODEL)
+        assert len(hashed) == 1
+
+        provider.clear_digest_cache()
+
+        assert not (tmp_path / "state" / "digests.json").exists()
+        provider.resolve(_MODEL)
+        assert len(hashed) == 2
+
     def test_a_replaced_file_gets_a_new_digest_and_header_without_refresh(
         self, provider: LlamaCppProvider, models: Path, gguf_writer: Callable[..., Path]
     ) -> None:
@@ -518,15 +570,103 @@ class TestDiscovery:
         assert raised.value.details["reason"] == ProviderUnavailableReason.LAUNCH_FAILED.value
 
 
-def test_the_in_memory_digest_store_is_inspectable_and_clearable() -> None:
+_DIGEST = "sha256:" + "0" * 64
+
+
+def test_the_in_memory_digest_store_is_inspectable_and_clearable(tmp_path: Path) -> None:
     store = InMemoryDigestStore()
-    store.put("k", "sha256:" + "0" * 64)
+    store.put("k", _DIGEST, path=tmp_path)
 
     assert len(store) == 1
-    assert store.get("k") == "sha256:" + "0" * 64
+    assert store.get("k") == _DIGEST
     store.clear()
     assert len(store) == 0
     assert store.get("k") is None
+
+
+class TestJsonFileDigestStore:
+    """ADR-0071: one versioned, atomically written, prunable, clearable file."""
+
+    def test_a_digest_survives_a_new_store_over_the_same_file(
+        self, tmp_path: Path, frozen_clock: Callable[[], datetime]
+    ) -> None:
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+        first = JsonFileDigestStore(tmp_path / "state" / "digests.json", clock=frozen_clock)
+        first.put("m|stamp", _DIGEST, path=model)
+
+        second = JsonFileDigestStore(tmp_path / "state" / "digests.json")
+
+        assert second.get("m|stamp") == _DIGEST
+        assert second.get("other") is None
+        assert len(second) == 1
+        payload = json.loads((tmp_path / "state" / "digests.json").read_text())
+        assert payload["version"] == 1
+        assert payload["entries"]["m|stamp"] == {
+            "path": str(model),
+            "digest": _DIGEST,
+            "computed_at": frozen_clock().isoformat(),
+        }
+        assert not list((tmp_path / "state").glob(".*.tmp")), "written through a temp sibling"
+        assert first.path == tmp_path / "state" / "digests.json"
+
+    def test_entries_for_files_that_no_longer_exist_are_pruned_on_write(
+        self, tmp_path: Path
+    ) -> None:
+        gone = tmp_path / "gone.gguf"
+        gone.write_bytes(b"x")
+        kept = tmp_path / "kept.gguf"
+        kept.write_bytes(b"y")
+        store = JsonFileDigestStore(tmp_path / "digests.json")
+        store.put("gone|1", _DIGEST, path=gone)
+        gone.unlink()
+
+        store.put("kept|1", _DIGEST, path=kept)
+
+        assert store.get("gone|1") is None
+        assert store.get("kept|1") == _DIGEST
+        assert len(store) == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        ["not json", "[1]", '{"version": 2, "entries": {}}', '{"version": 1, "entries": []}'],
+    )
+    def test_an_unreadable_or_foreign_file_is_treated_as_empty_and_overwritten(
+        self, tmp_path: Path, text: str
+    ) -> None:
+        path = tmp_path / "digests.json"
+        path.write_text(text)
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+        store = JsonFileDigestStore(path)
+
+        assert store.get("k") is None
+        assert len(store) == 0
+        store.put("k", _DIGEST, path=model)
+        assert json.loads(path.read_text())["version"] == 1
+        assert store.get("k") == _DIGEST
+
+    def test_a_malformed_entry_is_not_a_digest(self, tmp_path: Path) -> None:
+        path = tmp_path / "digests.json"
+        path.write_text(json.dumps({"version": 1, "entries": {"k": "bare", "j": {"digest": 3}}}))
+
+        store = JsonFileDigestStore(path)
+
+        assert store.get("k") is None
+        assert store.get("j") is None
+
+    def test_clear_removes_the_file_and_is_idempotent(self, tmp_path: Path) -> None:
+        path = tmp_path / "digests.json"
+        model = tmp_path / "m.gguf"
+        model.write_bytes(b"x")
+        store = JsonFileDigestStore(path)
+        store.put("k", _DIGEST, path=model)
+
+        store.clear()
+        store.clear()
+
+        assert not path.exists()
+        assert store.get("k") is None
 
 
 class _CountingStore(InMemoryDigestStore):
@@ -536,9 +676,9 @@ class _CountingStore(InMemoryDigestStore):
         super().__init__()
         self.puts = 0
 
-    def put(self, key: str, digest: str) -> None:
+    def put(self, key: str, digest: str, *, path: Path) -> None:
         self.puts += 1
-        super().put(key, digest)
+        super().put(key, digest, path=path)
 
 
 class TestResidency:
