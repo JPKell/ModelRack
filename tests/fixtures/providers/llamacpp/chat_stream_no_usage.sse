@@ -1,0 +1,16 @@
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"role": "assistant", "content": ""}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"content": "A KV"}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"content": " cache"}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"content": " stores"}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"content": " keys"}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"content": " and values."}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": "stop", "index": 0, "delta": {}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: [DONE]
+

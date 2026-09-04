@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": 400,
+    "message": "input is larger than the max context size. skipping",
+    "type": "exceed_context_size_error"
+  }
+}

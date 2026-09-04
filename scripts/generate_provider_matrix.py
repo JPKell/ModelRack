@@ -21,20 +21,31 @@ from __future__ import annotations
 
 import dataclasses
 import sys
+import tempfile
 from pathlib import Path
 
 from modelrack import ProviderCapabilities
 from modelrack.providers.fake import FULL_CAPABILITIES, MINIMAL_CAPABILITIES
+from modelrack.providers.llamacpp import LlamaCppProvider
 from modelrack.providers.ollama import OllamaProvider
 from modelrack.providers.openai_compatible import OpenAICompatibleProvider
 
 _OUTPUT = Path(__file__).resolve().parent.parent / "docs" / "providers.md"
+
+# The llama.cpp adapter needs an existing model directory to construct and creates its state
+# directory only on the first spawn, so pointing both at the temp directory reads its static
+# declaration without spawning, hashing or writing anything.
+_SCRATCH = Path(tempfile.gettempdir())
 
 _COLUMNS: tuple[tuple[str, ProviderCapabilities], ...] = (
     ("`OllamaProvider`", OllamaProvider(base_url="http://127.0.0.1:11434").capabilities()),
     (
         "`OpenAICompatibleProvider`",
         OpenAICompatibleProvider(base_url="http://127.0.0.1:8080").capabilities(),
+    ),
+    (
+        "`LlamaCppProvider`",
+        LlamaCppProvider(_SCRATCH, state_dir=_SCRATCH / "modelrack-unused-state").capabilities(),
     ),
     ("`FakeProvider` (full)", FULL_CAPABILITIES),
     ("`FakeProvider` (minimal)", MINIMAL_CAPABILITIES),
@@ -108,12 +119,17 @@ def render() -> str:
             "",
             "## Reading the columns",
             "",
-            "* **`OllamaProvider`** — the richest of the three: digests, residency control, a",
-            "  configurable served context, and deltas that really are one token each.",
+            "* **`OllamaProvider`** — the richest daemon-backed adapter: digests, residency",
+            "  control, a configurable served context, and deltas that really are one token each.",
             "* **`OpenAICompatibleProvider`** — honestly narrower, and that narrowness is the",
             "  point. `/v1/models` carries no digest anywhere, so every identity is `NAME_ONLY`",
             "  (ADR-0024 §2); the protocol has no residency endpoint and no per-request served",
             "  context, so those are declared `False` rather than accepted and ignored.",
+            "* **`LlamaCppProvider`** — the server this package spawns itself (ADR-0062), so",
+            "  residency control, a residency query and a configurable served context are",
+            "  literally what supervision is; identities are digest-bound because the adapter",
+            "  hashes the file it serves. `thinking_control` stays `False`: reasoning is *read*",
+            "  where the server reports it, but requesting or suppressing it is not exposed.",
             "* **`FakeProvider` (full)** — the default script, matching Ollama's declaration, so a",
             "  consumer's ordinary tests exercise the capable path.",
             "* **`FakeProvider` (minimal)** — every flag `False`. Testing only against the full",

@@ -78,7 +78,12 @@ class TestTheMatrixIsGenerated:
     def test_every_shipped_adapter_has_a_column(self, generator: ModuleType) -> None:
         rendered = generator.render()
 
-        for name in ("`OllamaProvider`", "`OpenAICompatibleProvider`", "`FakeProvider`"):
+        for name in (
+            "`OllamaProvider`",
+            "`OpenAICompatibleProvider`",
+            "`LlamaCppProvider`",
+            "`FakeProvider`",
+        ):
             assert name in rendered
 
     def test_the_declarations_the_matrix_reports_are_the_adapters_own(

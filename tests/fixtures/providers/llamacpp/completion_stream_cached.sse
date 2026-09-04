@@ -1,0 +1,12 @@
+data: {"index": 0, "content": "A KV", "tokens": [1000], "stop": false, "id_slot": 0, "tokens_predicted": 1, "tokens_evaluated": 21}
+
+data: {"index": 0, "content": " cache", "tokens": [1001], "stop": false, "id_slot": 0, "tokens_predicted": 2, "tokens_evaluated": 21}
+
+data: {"index": 0, "content": " stores", "tokens": [1002], "stop": false, "id_slot": 0, "tokens_predicted": 3, "tokens_evaluated": 21}
+
+data: {"index": 0, "content": " keys", "tokens": [1003], "stop": false, "id_slot": 0, "tokens_predicted": 4, "tokens_evaluated": 21}
+
+data: {"index": 0, "content": " and values.", "tokens": [1004], "stop": false, "id_slot": 0, "tokens_predicted": 5, "tokens_evaluated": 21}
+
+data: {"index": 0, "content": "", "tokens": [], "id_slot": 0, "stop": true, "model": "qwen3.5-9b-q8_0", "tokens_predicted": 5, "tokens_evaluated": 21, "generation_settings": {"n_ctx": 8192, "n_predict": -1, "model": "qwen3.5-9b-q8_0", "seed": 4294967295, "temperature": 0.8, "top_k": 40, "top_p": 0.95, "min_p": 0.05, "repeat_penalty": 1.0, "stream": false, "cache_prompt": true, "json_schema": null, "lora": [], "timings_per_token": false}, "prompt": "<|im_start|>user\nExplain KV caching briefly.<|im_end|>\n<|im_start|>assistant\n", "has_new_line": false, "truncated": false, "stop_type": "eos", "stopping_word": "", "tokens_cached": 26, "timings": {"cache_n": 8, "prompt_n": 13, "prompt_ms": 52.106, "prompt_per_token_ms": 4.008, "prompt_per_second": 249.491, "predicted_n": 5, "predicted_ms": 101.204, "predicted_per_token_ms": 20.241, "predicted_per_second": 49.405}}
+

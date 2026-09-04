@@ -10,7 +10,9 @@ supplying two fixtures. Phase 2 binds the fake twice, once with everything decla
 nothing, because half of what this suite checks is the *refusal* path and a suite that only ever
 ran against a capable provider would never execute it. Phase 3 adds a class for the recorded
 Ollama transport and Phase 4 one for the recorded OpenAI-compatible transport; neither needs a
-line of this file changed.
+line of this file changed. Phase 6 adds a class for the llama.cpp adapter over a recorded
+transport *and a fake process launcher* — the residency behaviours below spawn and terminate a
+server there, and this file still does not change.
 
 **Capability-gated behaviours are never silently skipped.** Where a capability is declared, the
 behaviour is exercised; where it is not, the suite asserts the adapter *refuses* with
@@ -25,6 +27,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import json
+import sys
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +48,7 @@ from baseaicore import (
     is_supported,
 )
 
+from conftest import FakeLauncher, FakeMonotonic, FakeProcessTable, FakeSleep
 from modelrack import (
     CapabilityUnsupported,
     GenerationCancelled,
@@ -64,6 +68,7 @@ from modelrack import (
     ToolCallDelta,
     ToolDefinition,
 )
+from modelrack.providers.llamacpp import LlamaCppProvider
 from modelrack.providers.ollama import OllamaProvider
 from modelrack.providers.openai_compatible import OpenAICompatibleProvider
 from modelrack.streaming import CancellationToken
@@ -77,6 +82,7 @@ from modelrack.testing import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
+    from pathlib import Path
 
     from baseaicore import TokenUsage
 
@@ -1028,6 +1034,130 @@ class TestOpenAICompatibleProviderConformance(ProviderConformanceSuite):
         ``prompt_tokens_details.cached_tokens`` 8, so a correct adapter reports input 13 and
         cache read 8 — and an adapter that skipped the reconciliation would report input 21 and
         bill the cached prefix twice.
+        """
+        names = {
+            UsageShape.NO_CACHE_DETAIL: "chat_complete.json",
+            UsageShape.CACHE_DETAIL: "chat_complete_cached.json",
+            UsageShape.NO_USAGE_OBJECT: "chat_complete_no_usage.json",
+        }
+
+        def provider_for(shape: UsageShape) -> Provider:
+            selected_chat_fixture["complete"] = names[shape]
+            return provider
+
+        return UsageShapes(
+            provider_for=provider_for,
+            cache_detail=CacheDetailShape(prompt_tokens=21, cached_tokens=8),
+        )
+
+
+_LLAMACPP_PORT = 18080
+_LLAMACPP_MODEL = "qwen3.5-9b-q8_0"
+
+
+class TestLlamaCppProviderConformance(ProviderConformanceSuite):
+    """The same suite against :class:`~modelrack.providers.llamacpp.LlamaCppProvider`.
+
+    Spec §11.5's third proof, and the first for an adapter that *spawns* what it talks to: the
+    transport is recorded as for the other two, and the process is a fake launcher from
+    ``conftest.py``, so ``test_residency_control_is_honoured_or_refused`` really does spawn a
+    server, see it resident, and terminate it — on a machine with no llama.cpp installed. The
+    model directory holds one GGUF the test writes, so discovery hashes real bytes and the
+    identity the suite resolves is digest-bound.
+    """
+
+    @pytest.fixture
+    def selected_chat_fixture(self) -> dict[str, str]:
+        """The recorded ``/v1/chat/completions`` body the transport serves next, by filename."""
+        return {"complete": "chat_complete.json"}
+
+    @pytest.fixture
+    def llamacpp_model_directory(self, tmp_path: Path, gguf_writer: Callable[..., Path]) -> Path:
+        directory = tmp_path / "models"
+        directory.mkdir()
+        gguf_writer(
+            directory / f"{_LLAMACPP_MODEL}.gguf",
+            metadata={
+                "general.architecture": "qwen35",
+                "general.name": "Qwen3.5 9B",
+                "general.file_type": 7,
+                "qwen35.block_count": 32,
+                "qwen35.context_length": 262144,
+                "qwen35.embedding_length": 4096,
+                "qwen35.attention.head_count": 16,
+                "qwen35.attention.head_count_kv": 4,
+                "tokenizer.ggml.tokens": [f"t{i}" for i in range(70)],
+            },
+            tensors=(("token_embd.weight", (4096, 8)),),
+            payload=b"\x00" * 64,
+        )
+        return directory
+
+    @pytest.fixture
+    def provider(
+        self,
+        llamacpp_model_directory: Path,
+        tmp_path: Path,
+        load_llamacpp_fixture: Callable[[str], Any],
+        selected_chat_fixture: dict[str, str],
+    ) -> Iterator[Provider]:
+        base = f"http://127.0.0.1:{_LLAMACPP_PORT}"
+
+        def chat_handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body.get("stream"):
+                return httpx.Response(
+                    200,
+                    content=load_llamacpp_fixture("chat_stream.sse").encode("utf-8"),
+                    headers={"Content-Type": "text/event-stream"},
+                )
+            return httpx.Response(
+                200, json=load_llamacpp_fixture(selected_chat_fixture["complete"])
+            )
+
+        with respx.mock(assert_all_called=False) as mock:
+            mock.get(f"{base}/health").mock(
+                return_value=httpx.Response(200, json=load_llamacpp_fixture("health_ok.json"))
+            )
+            mock.get(f"{base}/props").mock(
+                return_value=httpx.Response(200, json=load_llamacpp_fixture("props.json"))
+            )
+            mock.post(f"{base}/v1/chat/completions").mock(side_effect=chat_handler)
+            mock.post(f"{base}/completion").mock(
+                return_value=httpx.Response(200, json=load_llamacpp_fixture("completion.json"))
+            )
+            provider = LlamaCppProvider(
+                llamacpp_model_directory,
+                state_dir=tmp_path / "state",
+                server_path=sys.executable,
+                port_range=(_LLAMACPP_PORT, _LLAMACPP_PORT + 3),
+                launcher=FakeLauncher(),
+                process_table=FakeProcessTable(),
+                port_is_free=lambda _port: True,
+                sleep=FakeSleep(),
+                monotonic=FakeMonotonic(),
+            )
+            try:
+                yield provider
+            finally:
+                provider.close()
+
+    @pytest.fixture
+    def known_reference(self) -> str:
+        return _LLAMACPP_MODEL
+
+    @pytest.fixture
+    def usage_shapes(
+        self, provider: Provider, selected_chat_fixture: dict[str, str]
+    ) -> UsageShapes | None:
+        """All three shapes: llama-server reports cached input, so ``cache_detail`` is declared.
+
+        ``chat_complete_cached.json`` reports ``usage.prompt_tokens`` 21 with
+        ``timings.cache_n`` 8 (and the same 8 under ``prompt_tokens_details.cached_tokens``), so
+        a correct adapter reports input 13 and cache read 8 — the same arithmetic the
+        OpenAI-compatible and fake classes are held to. Declaring ``None`` here would have
+        exempted the one adapter whose server *does* reuse a KV cache across requests from the
+        case that catches double-billed cached input.
         """
         names = {
             UsageShape.NO_CACHE_DETAIL: "chat_complete.json",

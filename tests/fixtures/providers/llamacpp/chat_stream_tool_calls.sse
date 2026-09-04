@@ -1,0 +1,14 @@
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"role": "assistant", "content": ""}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_8b1d2f", "type": "function", "function": {"name": "get_weather", "arguments": ""}}]}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"city\": "}}]}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": null, "index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"Berlin\"}"}}]}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [{"finish_reason": "tool_calls", "index": 0, "delta": {}}], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk"}
+
+data: {"choices": [], "created": 1756908000, "id": "chatcmpl-7f3c1a2e9b4d", "model": "qwen3.5-9b-q8_0", "system_fingerprint": "b10792-3e1f9a2c", "object": "chat.completion.chunk", "usage": {"completion_tokens": 9, "prompt_tokens": 21, "total_tokens": 30, "prompt_tokens_details": {"cached_tokens": 0}}, "timings": {"cache_n": 0, "prompt_n": 21, "prompt_ms": 84.213, "prompt_per_token_ms": 4.01, "prompt_per_second": 249.368, "predicted_n": 9, "predicted_ms": 180.4, "predicted_per_token_ms": 20.044, "predicted_per_second": 49.889}}
+
+data: [DONE]
+

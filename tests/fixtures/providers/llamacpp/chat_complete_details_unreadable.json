@@ -1,0 +1,25 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "A KV cache stores the key and value projections of every token the model has already processed, so each new token attends over them without recomputing."
+      }
+    }
+  ],
+  "created": 1756908000,
+  "model": "qwen3.5-9b-q8_0",
+  "system_fingerprint": "b10792-3e1f9a2c",
+  "object": "chat.completion",
+  "id": "chatcmpl-7f3c1a2e9b4d",
+  "usage": {
+    "completion_tokens": 12,
+    "prompt_tokens": 21,
+    "total_tokens": 33,
+    "prompt_tokens_details": {
+      "cached_tokens": "eight"
+    }
+  }
+}

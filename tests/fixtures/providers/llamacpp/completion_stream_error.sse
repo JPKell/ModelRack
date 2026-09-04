@@ -1,0 +1,6 @@
+data: {"index": 0, "content": "A KV", "tokens": [1000], "stop": false, "id_slot": 0, "tokens_predicted": 1, "tokens_evaluated": 21}
+
+data: {"index": 0, "content": " cache", "tokens": [1001], "stop": false, "id_slot": 0, "tokens_predicted": 2, "tokens_evaluated": 21}
+
+data: {"error": {"code": 500, "message": "context shift is disabled", "type": "server_error"}}
+

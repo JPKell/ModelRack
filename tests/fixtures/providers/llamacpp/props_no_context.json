@@ -1,0 +1,7 @@
+{
+  "total_slots": 1,
+  "model_alias": "qwen3.5-9b-q8_0",
+  "model_path": "/srv/models/qwen3.5-9b-q8_0.gguf",
+  "build_info": "b10792-3e1f9a2c",
+  "is_sleeping": false
+}

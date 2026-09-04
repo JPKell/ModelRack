@@ -25,7 +25,10 @@ package that imports ``httpx``, and a process that only ever talks to the fake �
 suite's own test runs — has no reason to pay for that import. The second real adapter,
 :class:`~modelrack.providers.openai_compatible.OpenAICompatibleProvider`, is imported from
 ``modelrack.providers.openai_compatible`` for the same reason, and exists to prove the vocabulary
-below is not secretly shaped around Ollama: nothing in this module changed to support it.
+below is not secretly shaped around Ollama: nothing in this module changed to support it. The
+third, :class:`~modelrack.providers.llamacpp.LlamaCppProvider`, spawns and supervises the server
+it talks to (ADR-0062) — and the ``Provider`` protocol still did not change, which is the
+evidence that ``load``/``unload``/``list_resident`` were drawn in the right place.
 
 Anything not listed in ``__all__`` is private and may change without a version bump.
 
