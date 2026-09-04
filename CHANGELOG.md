@@ -7,6 +7,42 @@ packaging and release standards §3.
 
 ## [Unreleased]
 
+### Added
+- **`LlamaCppProvider`** (`modelrack.providers.llamacpp`), the third real adapter and the first
+  that runs the server it talks to: `load()` spawns `llama-server` with the base GGUF and the
+  runtime profile as launch flags, `unload()` terminates it, `list_resident()` reads the process
+  table — the `Provider` protocol unchanged (ADR-0062, adapter roadmap §4.1 P6). Discovery reads
+  GGUF headers from an application-supplied `model_directory`; every identity carries the sha256
+  of the served file (`identity_confidence = digest`), and a pinned digest the file no longer
+  matches is refused with `ModelNotFound` rather than served. Chat-style requests reach the
+  server's chat endpoint (tools, JSON schema, `reasoning_content` read into `thinking`);
+  completion-style requests reach the native `/completion` endpoint with the prompt untouched.
+- **Process supervision with an injectable seam** (`modelrack.providers._llamacpp_process`):
+  `ProcessLauncher`, `ServerProcess` and `ProcessTable` are injected the way `httpx.Client` and
+  clocks are, so every supervision path — spawn, health wait, exit-during-startup, startup
+  timeout, kill-tree, orphan recovery — is tested without a binary. The three named risks each
+  have their mitigation: orphans (servers spawned as session leaders and signalled as a group;
+  pid files written before the health wait and swept by the next supervisor; a finalizer on the
+  adapter), ports (a configured `port_range`, default 8180–8189), startup diagnosis (stderr
+  captured to a file in `state_dir` and its tail attached to the typed error).
+- Usage on both llama.cpp wire shapes read to ADR-0070's per-response rule from the first
+  commit: cached input is `timings.cache_n` (or `usage.prompt_tokens_details.cached_tokens`),
+  reconciled into disjoint classes; a response with no cached-input field reports cache classes
+  `0`; an unreadable figure refuses both `input_tokens` and `cache_read_tokens`; no counts at all
+  is every class `UNSUPPORTED`. `tokens_cached` — the slot's whole cache, prompt plus output — is
+  never read as cached input. The conformance suite runs against this adapter with the
+  cache-detail case **declared**, not skipped.
+- `ContextLimitExceeded` from this adapter carries the server's own `n_prompt_tokens` and
+  `n_ctx` where it reports them (`exceed_context_size_error`), the first adapter able to.
+- `ProviderUnavailableReason` gains `launch_failed`, `process_exited` and `not_ready`, for a
+  supervised provider that could not be started, exited, or is still loading.
+- A GGUF header reader and content hasher (`modelrack.providers._gguf`), a `write_gguf` test
+  helper, a `DigestStore` seam (in-memory by default) keyed by path and file stamp, recorded
+  fixtures under `tests/fixtures/providers/llamacpp/` annotated with the llama.cpp build they
+  represent (`b10792`, verified against the server source rather than captured), and a
+  `live`-marked journey in `tests/live/test_llamacpp_live.py`.
+- `docs/providers.md` gains the `LlamaCppProvider` column.
+
 ### Changed
 - **The reported shape of token usage changes for both real adapters.** A token class the wire
   protocol has no way to bill is now reported as `0` rather than `UNSUPPORTED`; a class the
@@ -50,6 +86,9 @@ packaging and release standards §3.
   existing payload changed and neither provider version moved.
 
 ### Documentation
+- The OpenAI chat-completions wire helpers moved from `providers/openai_compatible.py` into
+  `providers/_openai_wire.py` so the llama.cpp adapter shares them; private names only, no
+  behaviour change, the OpenAI-compatible adapter's own tests unchanged.
 - `_ollama_wire.read_usage` now states what `prompt_eval_count` counts, verified live rather than
   asserted: measured against Ollama 0.32.13, two back-to-back `/api/chat` requests sharing a
   ~5 400-token prefix both reported `prompt_eval_count` 5410 while `prompt_eval_duration` fell

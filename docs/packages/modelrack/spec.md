@@ -16,7 +16,8 @@ timing means.
 ## 2. Scope
 
 * The `Provider` protocol and its normalized request/result types.
-* Provider adapters: `OllamaProvider`, `OpenAICompatibleProvider`, `FakeProvider`.
+* Provider adapters: `OllamaProvider`, `OpenAICompatibleProvider`, `LlamaCppProvider`,
+  `FakeProvider`.
 * Model discovery, metadata inspection and normalization into `ModelDescriptor`.
 * Non-streaming generation, streaming generation, chat, tool-enabled chat.
 * Capability declaration and probing per provider.
@@ -31,7 +32,11 @@ timing means.
 * **No scoring or benchmarking.** Interpreting a result is FreeWeight's job.
 * **No retry or fallback policy.** ModelRack surfaces typed errors; the caller decides.
 * No persistence, no database, no caching beyond a documented in-memory metadata cache with an
-  explicit TTL and a `clear()`.
+  explicit TTL and a `clear()`. The one exception is process-supervision state: `LlamaCppProvider`
+  writes pid files and captured stderr under a `state_dir` the application names inside its own
+  data root, so a server orphaned by a crashed process can be recovered by the next one
+  ([ADR-0062](../../adr/0062-llamacpp-serves-adapters-through-a-supervised-process.md)
+  decision 6). It is supervision state, never a cache and never model data.
 * No prompt construction or templating.
 * No queueing, no concurrency control, no rate limiting (callers own their concurrency policy).
 * No model downloading, conversion or quantization.
@@ -117,6 +122,9 @@ class ProviderCapabilities:
 # Adapters
 OllamaProvider(base_url="http://127.0.0.1:11434", *, timeout=…, client=None)
 OpenAICompatibleProvider(base_url, *, api_key=None, timeout=…, client=None)
+LlamaCppProvider(model_directory, *, state_dir, server_path="llama-server",
+                 port_range=(8180, 8189), launcher=None, process_table=None,
+                 digest_store=None, timeout=…, client=None)   # ADR-0062
 FakeProvider(script: FakeScript | None = None, *, seed: int = 0)
 
 # Errors (all subclass baseaicore.SuiteError)
@@ -142,9 +150,14 @@ A provider base URL and options; `GenerationRequest` objects; user model referen
 
 ## 10. Data ownership
 
-None persistent. An optional in-memory metadata cache (default TTL 300 s) is explicitly documented,
-inspectable and clearable; it never survives the process. Generation results are never cached, and
-neither are residency or health — both are live state whose stale answer is worse than no answer.
+None persistent, except the pid files and captured stderr `LlamaCppProvider` keeps under an
+application-supplied `state_dir` (ADR-0062) — supervision state, never model data or a cache. An
+optional in-memory metadata cache (default TTL 300 s) is explicitly documented, inspectable and
+clearable; it never survives the process. Generation results are never cached, and neither are
+residency or health — both are live state whose stale answer is worse than no answer.
+`LlamaCppProvider`'s content digests are keyed by path and file stamp in an injectable
+`DigestStore`, in-memory by default; an application that persists them does so in its own data
+root, never through a file this package chooses.
 
 Because a tag can be repointed at any moment, a TTL alone cannot make a cached digest trustworthy.
 Every metadata read therefore takes a keyword-only `refresh: bool = False`, the explicit bypass a
@@ -183,8 +196,10 @@ downcasting to a concrete adapter; an adapter that caches nothing accepts it and
 ## 12. Configuration
 
 Constructor arguments only — base URL, timeouts (connect/read/total), headers, an injected
-`httpx.Client`, cache TTL, `verify` for TLS. ModelRack reads no environment variable and no file; the
-application owns configuration.
+`httpx.Client`, cache TTL, `verify` for TLS. ModelRack reads no environment variable and no
+configuration file; the application owns configuration. `LlamaCppProvider` reads GGUF files under
+an application-supplied `model_directory` and spawns `llama-server` through an injected launcher
+(ADR-0062); both directories it touches are named by the application.
 
 ## 13. Error behaviour
 
@@ -230,7 +245,9 @@ than once.
 ## 16. Cross-platform
 
 Pure Python over HTTP; fully portable. `OllamaProvider` requires only a reachable endpoint, not a
-local installation.
+local installation. `LlamaCppProvider` is the exception: it requires a local `llama-server` binary
+and POSIX process groups (`start_new_session`, `killpg`) for its kill-tree guarantee, and says so
+rather than degrading.
 
 ## 17. Observability
 
@@ -245,8 +262,9 @@ local installation.
 
 | Area | Tests |
 |---|---|
-| Conformance suite | Runs against `FakeProvider`, `OllamaProvider` (recorded), `OpenAICompatibleProvider` (recorded): discovery, inspect, generate, stream, cancel, errors, capabilities; usage per ADR-0070 — no cache detail → cache classes `0` and an estimate that totals, cache detail → disjoint classes, no usage object → every class `UNSUPPORTED` |
+| Conformance suite | Runs against `FakeProvider`, `OllamaProvider` (recorded), `OpenAICompatibleProvider` (recorded), `LlamaCppProvider` (recorded transport plus a fake process launcher): discovery, inspect, generate, stream, cancel, errors, capabilities; usage per ADR-0070 — no cache detail → cache classes `0` and an estimate that totals, cache detail → disjoint classes, no usage object → every class `UNSUPPORTED` |
 | Ollama adapter | Recorded `/api/tags`, `/api/show`, `/api/chat`, `/api/generate`, `/api/ps` responses; timing extraction; digest extraction; multi-model listing |
+| llama.cpp adapter | Recorded `/health`, `/props`, `/completion` and `/v1/chat/completions` responses; a fake process launcher for spawn, health wait, kill-tree, pid files and orphan recovery, with the real launcher proven against shell processes; GGUF headers and content digests from files the tests write; `tokens_cached` never read as cached input |
 | Metadata normalization | Every architecture field present/absent; malformed values → `UNSUPPORTED`; `raw` preserved byte-for-byte |
 | Streaming | Ordered deltas, terminal event, truncated stream, mid-stream error, cancellation, chunk-size variance, unicode split across chunks |
 | Errors | Every row of §13, with the documented type and details, and a test in each consumer asserting it maps that error to a documented code rather than to `INTERNAL_ERROR` |
@@ -256,7 +274,8 @@ local installation.
 | Performance | Overhead budgets against a fake HTTP transport |
 | Live (marked) | Real Ollama: discovery, generate, stream, unload, timings plausible |
 
-Coverage floor: **95 %**. The default suite must pass with no Ollama running.
+Coverage floor: **95 %**. The default suite must pass with no Ollama running and no
+`llama-server` installed.
 
 ## 19. Compatibility and versioning
 
@@ -271,8 +290,9 @@ Coverage floor: **95 %**. The default suite must pass with no Ollama running.
 
 1. FreeWeight and LoadCoach contain **no** provider HTTP code — verified by a grep-based boundary
    test in each repository.
-2. The conformance suite passes for all three shipped adapters.
-3. The full default test suite passes with no Ollama installed.
+2. The conformance suite passes for all shipped adapters (fake, Ollama, OpenAI-compatible,
+   llama.cpp).
+3. The full default test suite passes with no Ollama installed and no `llama-server` installed.
 4. A live test against Ollama 0.32.13 discovers models, generates, streams and unloads.
 5. Cancelling a stream stops it within one chunk and leaves no open connection (asserted by a
    connection-count test).
@@ -281,8 +301,8 @@ Coverage floor: **95 %**. The default suite must pass with no Ollama running.
 
 ## 21. Future extensions
 
-* `LlamaCppProvider` (HTTP server mode, plus optional `llama-bench` subprocess integration for
-  FreeWeight).
+* `llama-bench` subprocess integration for FreeWeight, beside the `LlamaCppProvider` Phase 6
+  added.
 * `VLLMProvider` including its metrics endpoint (KV-cache utilization, prefix-cache hits).
 * Embeddings API across providers.
 * An async provider API, if [ADR-0003](../../adr/0003-sync-vs-async-strategy.md)'s revisit trigger

@@ -2,6 +2,8 @@
 
 **Sequence position:** third component. Depends on BaseAiCore Phase 4.
 **Target:** `modelrack 0.5.0` by the end of Phase 5. **Reached 2026-08-26** — all five phases complete.
+Phases 6–8 are the adapter arc's LA1 checkpoint
+([adapter roadmap §4.1](../../roadmap/adapter-roadmap.md)), targeting the next minor (`0.7.0`).
 
 The ordering is deliberate and inherited from the prior project's best decision: **the fake provider
 is built before the real one**, so that every downstream component can be developed and tested
@@ -247,4 +249,96 @@ requiring the same observable behaviour from all adapters.
 after a model is re-pulled (mitigated by TTL plus an explicit `refresh=True` path).
 **Gold standards:** clean public API; one client suite-wide; cancellable streaming; no leaks;
 deterministic fake; ≥ 95 % coverage.
-**Deferred:** llama.cpp and vLLM adapters, embeddings, async API, tokenization, multi-modal input.
+**Deferred:** the llama.cpp adapter (Phase 6), the vLLM adapter, embeddings, async API,
+tokenization, multi-modal input.
+
+---
+
+## Phase 6 — LlamaCppProvider: process supervision and basic serving
+
+**Goal:** a third real adapter serves GGUF files directly by spawning and supervising
+`llama-server`, with digest-bound identities — the start of the adapter arc's LA1
+([adapter roadmap §4.1](../../roadmap/adapter-roadmap.md), P6;
+[ADR-0062](../../adr/0062-llamacpp-serves-adapters-through-a-supervised-process.md)).
+
+**Prerequisites:** Phase 5; the ADR-0070 usage rule (row C5) landed first, so the third adapter is
+written to it rather than retrofitted.
+
+**Work**
+* `providers/llamacpp.py`: `LlamaCppProvider` — spawn / health-wait / terminate `llama-server`
+  through `load()`, `unload()` and `list_resident()`, the `Provider` protocol unchanged.
+* GGUF discovery and hashing from a configured model directory: header parsing for descriptors;
+  the sha256 of the served artifact as the identity (identity confidence *bound*, better than
+  tag-based); the digest cached by path and file stamp with an explicit `refresh=True` path,
+  never substituted by a cheaper hash.
+* Profile flags: `n_gpu_layers`, KV cache types, flash attention, context size, threads, batch
+  size; a chat-template override through `provider_options`.
+* Generation and streaming over the server's native API — `/completion` for prompts, the chat
+  endpoint with llama.cpp's extensions (`timings`, `system_fingerprint`, `reasoning_content`) for
+  messages.
+* Usage read to ADR-0070's per-response rule from the start: cached input from `timings.cache_n`
+  reconciled into disjoint classes; a class the native API cannot bill is `0`, never
+  `UNSUPPORTED`; `tokens_cached` — the slot's whole cache — is never read as cached input.
+* Error translation for every row of the spec's §13 table; a startup failure carries the captured
+  stderr, a context overflow carries the server's own token counts.
+* Recorded fixtures, version-annotated with the llama.cpp build they represent.
+* The three named risks, each with its mitigation: orphaned processes (kill-tree on timeout, pid
+  files, a finalizer on the adapter), port management (a configured range), startup-failure
+  diagnosis (stderr captured into the typed error).
+
+**Files/subsystems**
+```text
+src/modelrack/providers/llamacpp.py            # the adapter
+src/modelrack/providers/_llamacpp_process.py   # the spawn seam: launcher, process table, supervisor
+src/modelrack/providers/_llamacpp_wire.py      # pure translation of both wire shapes
+src/modelrack/providers/_gguf.py               # header reading and content hashing
+src/modelrack/providers/_openai_wire.py        # chat-completions helpers shared with Phase 4
+tests/unit/{test_llamacpp_adapter,test_llamacpp_supervisor,test_llamacpp_wire,test_gguf}.py
+tests/fixtures/providers/llamacpp/*
+tests/live/test_llamacpp_live.py               # marked
+```
+
+**Tests**
+* Supervision through the injected seam: spawn, health wait, exit during startup with stderr,
+  startup timeout with kill-tree, port allocation and exhaustion, orphan recovery from pid files
+  (foreign owner untouched, stale file removed, reused pid spared, orphan killed) — and the
+  default launcher and process table proven against ordinary shell processes.
+* GGUF: every value type, large arrays summarised, parameter count from tensor records, every
+  refusal; the content digest against `hashlib`.
+* Discovery: only base models listed; shards, adapters, projectors and malformed files skipped;
+  a digest computed once per file and recomputed on `refresh=True` or a changed stamp.
+* Residency: a profile becomes launch flags; a differing profile restarts; two bases on two
+  ports; a crashed server reported once, typed, then respawned; a pinned digest that no longer
+  matches is refused.
+* Generation and streaming on both shapes: the three ADR-0070 cases, `tokens_cached` ignored,
+  reasoning, tool calls, cancellation within one event, truncation, in-band errors.
+* Conformance suite passes against the recorded transport and the fake launcher, with the
+  cache-detail case declared.
+* Live (marked): real headers and one real digest from the reference machine's directory; a real
+  `llama-server` journey — discovery, load, generate, stream, unload, no process left behind.
+
+**Acceptance criteria**
+1. The default suite passes with **no `llama-server` installed** and no GGUF file larger than a
+   test writes.
+2. Every identity from this adapter carries the sha256 of the served file; a pinned digest that
+   does not match is a typed refusal.
+3. No code path leaves a process behind: a startup timeout kills, `unload()` kills, a dropped
+   adapter kills, and a server orphaned by a crashed supervisor is recovered from its pid file.
+4. A startup failure surfaces as a typed error carrying the exit code and the captured stderr.
+5. The conformance suite passes for all four adapters (fake, Ollama, OpenAI-compatible,
+   llama.cpp) with the three usage cases declared.
+6. Coverage ≥ 95 %.
+
+**Known risks:** orphaned processes, port collisions, startup failures nobody can diagnose — each
+named in the adapter roadmap and each mitigated above. The live journey cannot run on a machine
+without llama.cpp; it is an operator step on LA1's critical path.
+**Likely failure modes:** reading `tokens_cached` as cached input (it is the whole cache);
+hashing 40 GB on every discovery call (mitigated by the stamp-keyed digest store and the
+persistent store an application may inject); a profile served by a server launched under
+different flags (mitigated by comparing launch flags, not profile hashes).
+**Gold standards:** one client for the whole suite; typed errors; unsupported-safe measurement;
+no leaked processes; digest-bound identity.
+**Deferred:** adapters (Phase 7 — registration from manifests, per-request selection,
+`adapter_hot_swap`, `AdapterNotFound`, `pending_restart`, the cache-correctness conformance
+test); cancellation under supervision, leak tests and publication (Phase 8); the vLLM adapter,
+embeddings, async API, tokenization, multi-modal input.

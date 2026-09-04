@@ -12,6 +12,9 @@ itself against; and Phase 5 adds the operational surface LoadCoach depends on â€
 capability gating, hardened cancellation, an explicit metadata cache, and an optional `on_event`
 observability hook. See the [development plan](docs/packages/modelrack/development-plan.md) for
 what each phase adds, and the [quickstart](docs/quickstart.md) to run something in five minutes.
+**Unreleased, riding the next minor:** Phase 6 adds a third real adapter, `LlamaCppProvider`,
+which spawns and supervises `llama-server` itself and serves GGUF files with digest-bound
+identities â€” the start of the adapter arc (ADR-0062); see the changelog.
 
 Part of the **Local AI Suite**.
 
