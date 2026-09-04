@@ -547,6 +547,17 @@ all four adapters, and `modelrack 0.7.0` on PyPI carrying Phases 6 and 7 togethe
   including `adapter_hot_swap`.
 * Sharded GGUFs: decide whether a sharded base is served or refused with a named reason, rather
   than skipped at discovery with a debug log (D3 finding 6).
+* **[ADR-0074](../../adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md)'s mechanism,
+  before publication.** Phase 7 found that ADR-0060's "serving mode lives in the runtime profile"
+  had nothing behind it: `--lora` flags come from the registration set, `RuntimeProfile` is a
+  separate object, and a base on an adapter-registered server hashes identically to the same base
+  on a clean one. Two pieces: BaseAiCore gains
+  `RuntimeProfile.adapters_registered: bool | None = None` (tri-state, because a `False` default
+  would be hashed and move every stored `profile_hash`; `None` is dropped from the hash already),
+  and this adapter **refuses** a request whose profile disagrees with the server it would use —
+  the `context_configurable` discipline of ADR-0023 §4 one level up. It lands here because 0.7.0
+  publishing without it ships a known silent-merge gap, and because evidence recorded before the
+  field exists cannot be separated afterwards.
 * `docs/providers.md` regenerated; the spec's §7 surface, §10 data ownership and §13 error table
   final; the tested llama.cpp build pinned in the documentation (ADR-0062's consequence).
 * Version to `0.7.0`, `CHANGELOG.md` moved out of `## [Unreleased]`, tag, publish, verify the
@@ -564,11 +575,14 @@ all four adapters, and `modelrack 0.7.0` on PyPI carrying Phases 6 and 7 togethe
 1. Twenty load/unload cycles leave nothing behind — no process, no pid file, no handle.
 2. A cancelled stream leaves a usable server and a zeroed in-flight count.
 3. The conformance suite passes for all four adapters, every skip declared.
-4. **The LA1 exit demonstration** on the reference machine: one llama-server base, three registered
+4. A profile that misdescribes the server is refused, and a profile that does not mention
+   `adapters_registered` hashes exactly as it did before the field existed — asserted over an
+   existing golden, not claimed (ADR-0074).
+5. **The LA1 exit demonstration** on the reference machine: one llama-server base, three registered
    adapters, twenty generations alternating adapters, **zero base loads** — asserted from the
    process table and from load timings, not from absence of complaint (I16).
-5. `modelrack 0.7.0` on PyPI; the demos run against the published wheel.
-6. Coverage ≥ 95 %.
+6. `modelrack 0.7.0` on PyPI; the demos run against the published wheel.
+7. Coverage ≥ 95 %.
 
 **Known risks:** the LA1 exit needs a GPU session with real adapter artefacts, which is an operator
 step on the critical path and cannot be faked; flat memory across twenty cycles is the one
