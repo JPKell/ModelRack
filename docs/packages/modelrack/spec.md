@@ -22,6 +22,7 @@ timing means.
 * Non-streaming generation, streaming generation, chat, tool-enabled chat.
 * Capability declaration and probing per provider.
 * Model load/unload and residency inspection where the provider supports it.
+* LoRA adapter registration, per-request selection and refusal, where the provider supports it.
 * Timing and token normalization, keeping backend-reported and client-observed values separate.
 * Error translation into a typed hierarchy.
 * Cancellation of an in-flight generation.
@@ -42,7 +43,14 @@ timing means.
   model data; the digest file is clearable and safe to delete.
 * No prompt construction or templating.
 * No queueing, no concurrency control, no rate limiting (callers own their concurrency policy).
-* No model downloading, conversion or quantization.
+* No model downloading, conversion or quantization — including **no reading of the adapter
+  directory**: ModelRack receives adapter manifests from the application that read it, and
+  validates and mounts them ([ADR-0061](../../adr/0061-the-adapter-registry-is-a-directory-and-a-manifest.md)
+  rule 3). It therefore does not depend on `setspec`, and `model.adapter_manifest` is converted to
+  `AdapterRegistration` by the application.
+* **No adapter composition, no scale mixing, no per-request scale** — one adapter, at `1.0`
+  ([ADR-0063](../../adr/0063-one-adapter-at-a-time.md)). There is nowhere for a scale to be passed,
+  deliberately.
 * No async API ([ADR-0003](../../adr/0003-sync-vs-async-strategy.md)).
 
 ## 4. Responsibilities
@@ -61,8 +69,11 @@ timing means.
 
 ## 5. Dependencies
 
-`baseaicore`, `httpx>=0.27,<1`. Nothing else. (Not `setspec` — ModelRack's types are in-process;
-applications serialize them.)
+`baseaicore>=0.4.1`, `httpx>=0.27,<1`. Nothing else. (Not `setspec` — ModelRack's types are
+in-process; applications serialize them, and an adapter manifest is converted to
+`AdapterRegistration` by the application that read the directory.) The `0.4.1` floor is where
+`AdapterIdentity` and `verify_adapter_base_compatibility` live: adapter identity is **used** here,
+never redefined ([ADR-0058](../../adr/0058-the-execution-subject-gains-an-adapter-axis.md)).
 
 ## 6. Consumers
 
@@ -86,11 +97,14 @@ class Provider(Protocol):
     def load(self, identity: ModelIdentity, profile: RuntimeProfile) -> LoadResult: ...
     def unload(self, identity: ModelIdentity) -> bool: ...
     def list_resident(self) -> Sequence[ResidentModel]: ...
+    def list_adapters(self) -> Sequence[AdapterState]: ...
+    def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None: ...
 
 @dataclass(frozen=True, slots=True)
 class GenerationRequest:
     identity: ModelIdentity
     messages: Sequence[Message]              # or prompt=… for completion-style
+    adapter: str | None = None               # a registered adapter's name; one, never two
     runtime_profile: RuntimeProfile = RuntimeProfile()
     sampling: SamplingParameters = SamplingParameters()   # temperature, top_p, top_k, seed,
                                                           # max_output_tokens, stop, repeat_penalty
@@ -111,6 +125,8 @@ class GenerationResult:
     tool_calls: tuple[ToolCall, ...] = ()
     thinking: str | Unsupported = UNSUPPORTED
     provider_version: str | None = None
+    adapter: AdapterIdentity | None = None   # the subject's adapter axis, or None
+    adapter_base_confidence: IdentityConfidence | None = None   # DIGEST | NAME_ONLY
     raw: Mapping[str, Any] = {}              # diagnostics only
 
 StreamEvent = TokenDelta | ToolCallDelta | ThinkingDelta | StreamCompleted | StreamFailed
@@ -120,12 +136,36 @@ class ProviderCapabilities:
     streaming: bool; tool_calling: bool; structured_output: bool; json_mode: bool
     token_counts: bool; token_level_chunks: bool; thinking_control: bool; logprobs: bool
     force_unload: bool; residency_query: bool; kv_metrics: bool; context_configurable: bool
-    embedding: bool
+    embedding: bool; adapter_hot_swap: bool
+
+@dataclass(frozen=True, slots=True)
+class AdapterRegistration:                   # what an application converts a manifest into
+    name: str                                # ^[a-z][a-z0-9_-]{1,63}$ — the pin name
+    artifact_path: Path                      # a locator, never the identity
+    artifact_sha256: str                     # the identity (ADR-0058)
+    base_model_name: str
+    data_classification: DataClassification   # required, no default (ADR-0065)
+    source_sha256: str | None = None         # lineage only
+    base_artifact_digest: str | None = None  # absent → NAME_ONLY, flagged everywhere
+    adapter_format: str = "gguf"
+    # .identity -> baseaicore.AdapterIdentity
+
+class AdapterStatus(StrEnum):
+    REGISTERED | PENDING_RESTART | AWAITING_BASE | INCOMPATIBLE
+
+@dataclass(frozen=True, slots=True)
+class AdapterState:
+    adapter: AdapterRegistration
+    status: AdapterStatus
+    base_model_name: str
+    base_confidence: IdentityConfidence | None = None
+    server_id: int | None = None
+    reason: str | None = None
 
 # Adapters
 OllamaProvider(base_url="http://127.0.0.1:11434", *, timeout=…, client=None)
 OpenAICompatibleProvider(base_url, *, api_key=None, timeout=…, client=None)
-LlamaCppProvider(model_directory, *, state_dir, server_path="llama-server",
+LlamaCppProvider(model_directory, *, state_dir, adapters=(), server_path="llama-server",
                  port_range=(8180, 8189), launcher=None, process_table=None,
                  digest_store=None, timeout=…, client=None)   # ADR-0062
 FakeProvider(script: FakeScript | None = None, *, seed: int = 0)
@@ -139,6 +179,7 @@ ProviderError               PROVIDER_ERROR
 ├── ContextLimitExceeded    CONTEXT_LIMIT_EXCEEDED
 ├── CapabilityUnsupported   CAPABILITY_UNSUPPORTED
 ├── GenerationCancelled     GENERATION_CANCELLED
+├── AdapterNotFound         ADAPTER_NOT_FOUND        # named adapter unknown or refused for this base
 └── ProviderRejected        PROVIDER_REJECTED        # 4xx from the provider, e.g. bad options
 ```
 
@@ -161,7 +202,10 @@ residency or health — both are live state whose stale answer is worse than no 
 `LlamaCppProvider`'s content digests are keyed by path and file stamp in an injectable
 `DigestStore`, by default a versioned `<state_dir>/digests.json` written atomically and pruned of
 files that no longer exist (ADR-0071); `clear_digest_cache()` removes it, and so may an operator.
-An in-memory store remains available for a caller that wants no persistence.
+An in-memory store remains available for a caller that wants no persistence. Adapter
+registrations and their states are **in memory only** and last as long as the provider object: a
+registration is the application's record, and a state is a fact about a process that is running
+now.
 
 Because a tag can be repointed at any moment, a TTL alone cannot make a cached digest trustworthy.
 Every metadata read therefore takes a keyword-only `refresh: bool = False`, the explicit bypass a
@@ -196,6 +240,34 @@ downcasting to a concrete adapter; an adapter that caches nothing accepts it and
    caller whether it may set a served context or must record one as assumed
    ([ADR-0023 §4](../../adr/0023-runtime-profile-resolution.md)). An adapter that cannot configure
    context declares `False` rather than accepting the setting and ignoring it.
+11. `capabilities().adapter_hot_swap` is load-bearing, not informational: it is what tells a
+   caller whether it may name an adapter, and a request carrying one to a provider that declares
+   `False` raises `CapabilityUnsupported` rather than silently running the bare base
+   ([ADR-0062](../../adr/0062-llamacpp-serves-adapters-through-a-supervised-process.md)
+   decision 5). Because the only adapter that declares it supervises a local process, ADR-0065's
+   local-only invariant holds by construction rather than by policy.
+12. **A request states its whole adapter configuration, or none at all.** Against a server with
+   adapters registered, every request carries a complete `lora` list — the selected adapter at
+   `1.0` and every other registered adapter explicitly at `0.0`; against a server with none, the
+   key is absent and the body is byte-for-byte what it was before the adapter axis existed. A
+   *partial* list is not an option: llama-server treats an absent `lora` field as "restore the
+   launch-time set" and takes that branch **without** consulting `lora_should_clear_cache`, and
+   `--lora` registers at scale `1.0` whether or not `--lora-init-without-apply` is given. A
+   bare-base request that sent nothing would therefore run with every registered adapter applied,
+   against the previous request's cached prefix.
+13. **The subject cannot be moved through the escape hatch.** `provider_options` may not carry
+   `lora` (the selection itself), `id_slot`/`slot_id` (a slot pin, which reaches past the server's
+   adapter-aware cache clearing) or `--lora*` (an adapter registered with no digest, no verified
+   base and no name a result could report). Each is a typed refusal. The supported channel is
+   `GenerationRequest.adapter`, which is resolved, verified against the served base, and reported
+   back on the result.
+14. **An adapter is applied only to a base it was verified against, and the verification is by
+   digest.** A manifest that declares a base digest is applied only where that digest is the one
+   served; a manifest that declares only a name is admitted with `NAME_ONLY` confidence, which is
+   carried on `AdapterState.base_confidence` and on every `GenerationResult` it produces. A
+   mismatch is a recorded refusal, never an attempt (ADR-0058 rule 5). An adapter registered after
+   its base's server started reports `pending_restart` and folds in at the next moment nothing is
+   in flight against that server — **never mid-work** (ADR-0062 decision 3).
 
 ## 12. Configuration
 
@@ -204,7 +276,9 @@ Constructor arguments only — base URL, timeouts (connect/read/total), headers,
 configuration file; the application owns configuration. `LlamaCppProvider` reads GGUF files under
 an application-supplied `model_directory` and spawns `llama-server` through an injected launcher
 (ADR-0062); both directories it touches are named by the application, and its digest file lives
-in the second (ADR-0071).
+in the second (ADR-0071). Adapters are supplied as `AdapterRegistration` objects — at construction
+or through `register_adapters()` — by the application that read the operator's adapter directory;
+this package never reads it (ADR-0061 rule 3).
 
 ## 13. Error behaviour
 
@@ -216,6 +290,11 @@ in the second (ADR-0071).
 | 404 / model missing | `ModelNotFound` | Includes the reference and the known model count |
 | Provider reports a context overflow | `ContextLimitExceeded` | Includes requested and maximum where known |
 | Tools/schema requested but unsupported | `CapabilityUnsupported` | Names the capability |
+| An adapter named against a provider declaring `adapter_hot_swap = False` | `CapabilityUnsupported` | Names `adapter_hot_swap`. Never a bare-base generation under the caller's adapter subject |
+| An adapter named that was never registered | `AdapterNotFound` | `details` carries `adapter`, `registered` and `reason = "unknown"` |
+| An adapter refused for the base being served | `AdapterNotFound` | `reason = "incompatible_base"`, with `declared_base_digest` and `served_base_digest` |
+| An adapter compatible but pending a restart, with work in flight | `ProviderUnavailable` | `reason = "restart_pending"`, with `restart_reason` and `in_flight`. **Temporary** — it resolves at the next idle |
+| `provider_options` carries `lora`, a slot pin, or a `--lora*` flag | `ProviderRejected` | Names the key. Each would move the subject behind the record |
 | Cancellation token triggered | `GenerationCancelled` | Partial text preserved in `details`. Only reachable from `stream()`; `generate()` offers no boundary at which a token can take effect, which is why LoadCoach always calls `stream()` and assembles the response itself ([LoadCoach API §5](../../apps/loadcoach/api.md)) |
 | 4xx with a provider message | `ProviderRejected` | Provider message preserved verbatim |
 | Stream truncated without a terminal chunk | `ProviderProtocolError` | Partial result preserved |
@@ -277,7 +356,9 @@ rather than degrading.
 | Fake provider | Deterministic output for a seed; scripted delays, tool calls, malformed responses, timeouts |
 | Security | API key never appears in `raw`, `details` or DEBUG logs; oversize response rejected; non-http scheme rejected |
 | Performance | Overhead budgets against a fake HTTP transport |
-| Live (marked) | Real Ollama: discovery, generate, stream, unload, timings plausible |
+| Adapters | Registration by digest (match, mismatch refused with both digests, name-only admitted and flagged, another base's ignored); ids read back from `GET /lora-adapters` rather than assumed from argv; selection, `AdapterNotFound` both ways, the `provider_options` refusals; `pending_restart` and the in-flight guard, with the race forced by a partly drained stream |
+| **I17 — adapter cache correctness** | The structural half in the default gate: a checker over recorded request bodies asserting a complete `lora` list with exactly the named adapter enabled and no slot pin, driven over a randomized alternating sequence across both endpoints and both streaming modes — and **proved by making it fail** against three injected defects (selection dropped, selection stale, slot pin added). The semantic half is live |
+| Live (marked) | Real Ollama: discovery, generate, stream, unload, timings plausible. Real `llama-server`: the journey, and **I17's semantic canary** — one prompt, two adapters, distinct continuations after a shared prefix. The canary needs two real adapter GGUFs for one base; where they are absent it skips **visibly**, naming what it needs, and never passes vacuously |
 
 Coverage floor: **95 %**. The default suite must pass with no Ollama running and no
 `llama-server` installed.
@@ -298,11 +379,13 @@ Coverage floor: **95 %**. The default suite must pass with no Ollama running and
 2. The conformance suite passes for all shipped adapters (fake, Ollama, OpenAI-compatible,
    llama.cpp).
 3. The full default test suite passes with no Ollama installed and no `llama-server` installed.
-4. A live test against Ollama 0.32.13 discovers models, generates, streams and unloads.
-5. Cancelling a stream stops it within one chunk and leaves no open connection (asserted by a
+4. A subject naming no adapter is byte-for-byte what it was before the adapter axis existed — the
+   request body, the result and the canonical form — asserted over goldens rather than claimed.
+5. A live test against Ollama 0.32.13 discovers models, generates, streams and unloads.
+6. Cancelling a stream stops it within one chunk and leaves no open connection (asserted by a
    connection-count test).
-6. Every error row in §13 is produced by a test.
-7. `mypy --strict`, `ruff`, `lint-imports` clean; coverage ≥ 95 %.
+7. Every error row in §13 is produced by a test.
+8. `mypy --strict`, `ruff`, `lint-imports` clean; coverage ≥ 95 %.
 
 ## 21. Future extensions
 

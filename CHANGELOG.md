@@ -8,6 +8,51 @@ packaging and release standards §3.
 ## [Unreleased]
 
 ### Added
+- **LoRA adapters on `LlamaCppProvider`**: one warm base serves several adapters, selected per
+  request, with no reload between them (ADR-0062, adapter roadmap §4.1 P7). An application hands
+  over `AdapterRegistration` objects — at construction or through `register_adapters()` — built
+  from the manifests it read; **this package never reads the adapter directory and still depends
+  on nothing but `baseaicore` and `httpx`** (ADR-0061 rule 3). Every compatible registration is
+  pre-registered at launch (`--lora`, `--lora-init-without-apply`) and selected per request; the
+  server's own ids are read back from `GET /lora-adapters` rather than assumed from argv order.
+- **Adapter identity is used, never redefined**: `AdapterRegistration.identity` returns
+  `baseaicore.AdapterIdentity`, and base compatibility is decided by
+  `verify_adapter_base_compatibility` — **by digest, fail closed** (ADR-0058 rule 5). A manifest
+  that declares only a base name is admitted with `NAME_ONLY` confidence, carried on
+  `AdapterState.base_confidence` and on every `GenerationResult` it produces. A digest mismatch is
+  a recorded refusal that never reaches the command line, and it takes only that adapter out —
+  never its base or its siblings.
+- **`ProviderCapabilities.adapter_hot_swap`**, the fourteenth flag, defaulting `False`; `True` for
+  `LlamaCppProvider` alone. Load-bearing like `context_configurable`: naming an adapter against a
+  provider that declares `False` raises `CapabilityUnsupported`, never a silent bare-base
+  generation. Because the only adapter that declares it supervises a local process, ADR-0065's
+  adapters-are-local-only invariant holds by construction.
+- **`Provider.list_adapters()` and `Provider.register_adapters()`**, so a caller holding a
+  `Provider` can show adapter rows and fold in a rescan without downcasting to a concrete adapter.
+  Both raise `CapabilityUnsupported` where the flag is `False`. No lifecycle method was added —
+  `load`/`unload`/`list_resident` are untouched.
+- **`GenerationRequest.adapter`** (a registered name, `model`-pin semantics) and
+  **`GenerationResult.adapter` / `.adapter_base_confidence`**, so a stored result names its whole
+  subject rather than its base. A request naming no adapter is byte-for-byte what it was before:
+  same body, `adapter=None`, existing goldens untouched.
+- **`AdapterNotFound`** (`ADAPTER_NOT_FOUND`) for a name that was never registered
+  (`reason="unknown"`) or was refused for the base being served (`reason="incompatible_base"`,
+  with both digests), and **`ProviderUnavailableReason.RESTART_PENDING`** for the temporary case: a
+  compatible adapter that needs a restart while work is in flight. Permanent versus temporary is
+  the distinction — one needs a person, the other resolves at the next idle.
+- **`pending_restart` and an in-flight guard.** A registration handed over after its base's server
+  started folds in at the next moment nothing is in flight against that server — never mid-work.
+  The same guard covers the profile-change restart, which until now terminated a server another
+  request might be streaming from. A stream's claim is released when it is drained, abandoned or
+  collected, so a dropped iterator cannot leave a server permanently un-restartable.
+- **I17, the adapter cache-correctness conformance test**
+  (`tests/contract/test_adapter_isolation.py`). A checker over recorded request bodies asserts
+  that every request states its **complete** adapter configuration — the named adapter at `1.0`,
+  every other registered adapter explicitly at `0.0` — and carries no slot pin; it is driven over
+  a randomized alternating sequence across both endpoints and both streaming modes, and **proved
+  by making it fail** against three injected defects. The semantic canary (one prompt, two
+  adapters, distinct continuations) is a `live` test that skips visibly, naming the artefacts it
+  needs, where no adapter GGUF exists.
 - **`LlamaCppProvider`** (`modelrack.providers.llamacpp`), the third real adapter and the first
   that runs the server it talks to: `load()` spawns `llama-server` with the base GGUF and the
   runtime profile as launch flags, `unload()` terminates it, `list_resident()` reads the process
@@ -56,6 +101,19 @@ packaging and release standards §3.
   adapter.
 
 ### Changed
+- The `baseaicore` floor moves to **`>=0.4.1`** (still `<0.5`), which is where `AdapterIdentity`
+  and `verify_adapter_base_compatibility` live. The dependency *set* is unchanged: `baseaicore`
+  and `httpx`, and `.importlinter` was not touched.
+- A request to a llama-server that has adapters registered now carries a complete `lora` field
+  even when it names no adapter. This is a correctness fix, not a nicety: llama-server treats an
+  absent `lora` as "restore the launch-time set" and takes that branch **without** clearing the
+  slot's prompt cache, and `--lora` registers at scale `1.0` regardless of
+  `--lora-init-without-apply` — so a bare-base request that sent nothing would have run with every
+  registered adapter applied, against the previous request's prefix. A server with no adapters
+  registered still sends no `lora` key at all.
+- `provider_options` now refuses `lora`, `id_slot`/`slot_id` and `--lora*` with
+  `ProviderRejected`. Each would change the weights or the cache that answered without changing
+  the recorded subject.
 - **The reported shape of token usage changes for both real adapters.** A token class the wire
   protocol has no way to bill is now reported as `0` rather than `UNSUPPORTED`; a class the
   protocol can express but a response did not carry stays `UNSUPPORTED`; a response with no usage
