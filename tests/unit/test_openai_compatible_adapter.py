@@ -647,6 +647,7 @@ class TestGeneration:
         assert body["max_tokens"] == 256
         assert body["stop"] == ["\n\n"]
         assert body["repetition_penalty"] == 1.1
+        assert body["repeat_penalty"] == 1.1, "llama-server reads this spelling, vLLM the other"
 
     @respx.mock
     def test_provider_options_extends_and_overrides_the_body(

@@ -1068,7 +1068,12 @@ class OpenAICompatibleProvider:
         if sampling.stop:
             body["stop"] = list(sampling.stop)
         if sampling.repeat_penalty is not None:
+            # Two spellings for one knob, because the servers this adapter targets disagree:
+            # vLLM reads `repetition_penalty` and llama-server reads `repeat_penalty`, and each
+            # ignores the other. Sending both is the only way a caller's penalty reaches whichever
+            # is on the other end, and neither server objects to an unknown key.
             body["repetition_penalty"] = sampling.repeat_penalty
+            body["repeat_penalty"] = sampling.repeat_penalty
         if request.tools:
             body["tools"] = request_tool_definitions(request.tools)
         if request.response_format is not None:

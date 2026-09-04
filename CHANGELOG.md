@@ -36,12 +36,24 @@ packaging and release standards §3.
   `n_ctx` where it reports them (`exceed_context_size_error`), the first adapter able to.
 - `ProviderUnavailableReason` gains `launch_failed`, `process_exited` and `not_ready`, for a
   supervised provider that could not be started, exited, or is still loading.
+- **Artifact digests persist** in `<state_dir>/digests.json` by default (ADR-0071): a versioned
+  file, keyed by path and file stamp, written atomically and pruned of files that no longer
+  exist, so a model directory is hashed once per `state_dir` rather than once per process
+  (39 GB ≈ 45 s on the reference machine). `LlamaCppProvider.clear_digest_cache()` removes it;
+  deleting the file by hand is equally safe; `InMemoryDigestStore` remains for callers that want
+  no persistence, and any `DigestStore` may be injected.
 - A GGUF header reader and content hasher (`modelrack.providers._gguf`), a `write_gguf` test
-  helper, a `DigestStore` seam (in-memory by default) keyed by path and file stamp, recorded
+  helper, a `DigestStore` seam keyed by path and file stamp, recorded
   fixtures under `tests/fixtures/providers/llamacpp/` annotated with the llama.cpp build they
   represent (`b10792`, verified against the server source rather than captured), and a
   `live`-marked journey in `tests/live/test_llamacpp_live.py`.
 - `docs/providers.md` gains the `LlamaCppProvider` column.
+
+### Fixed
+- `OpenAICompatibleProvider` now sends `repeat_penalty` beside `repetition_penalty`. llama-server
+  reads only the former and vLLM only the latter, and each ignores the other, so a caller's
+  `SamplingParameters.repeat_penalty` was silently dropped by a llama-server reached through this
+  adapter.
 
 ### Changed
 - **The reported shape of token usage changes for both real adapters.** A token class the wire
