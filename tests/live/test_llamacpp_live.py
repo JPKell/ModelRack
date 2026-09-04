@@ -13,6 +13,11 @@ deliberately broken, in two steps that need different things:
 * :class:`TestRealServer` additionally needs the binary — ``MODELRACK_LLAMACPP_SERVER``, or
   ``llama-server`` on ``PATH`` — and runs the journey: health, load, resident, generate, stream,
   unload, and **no process left behind**, checked in the process table by pid.
+* :class:`TestAdapterCanary` is **I17's semantic half** and needs more again: two real LoRA
+  adapter GGUFs for one base, named by ``MODELRACK_LLAMACPP_ADAPTERS`` (see the class docstring
+  for exactly what to put there). It cannot be faked — the whole assertion is that two adapters
+  produce *different* continuations of one prompt, which only real weights can do — so where the
+  artefacts are absent it skips with them named, and never passes vacuously.
 
 Both skip when what they need is absent, and ``MODELRACK_REQUIRE_LLAMACPP=1`` turns that skip
 into a failure the way ``MODELRACK_REQUIRE_OLLAMA`` does for the Ollama live suite: a silently
@@ -31,9 +36,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from baseaicore import IdentityConfidence, RuntimeProfile, is_supported, normalize_digest
+from baseaicore import (
+    DataClassification,
+    IdentityConfidence,
+    RuntimeProfile,
+    is_supported,
+    normalize_digest,
+)
 
 from modelrack import (
+    AdapterRegistration,
+    AdapterStatus,
     FinishReason,
     GenerationRequest,
     Message,
@@ -57,11 +70,14 @@ pytestmark = pytest.mark.live
 _MODELS = os.environ.get("MODELRACK_LLAMACPP_MODELS")
 _SERVER = os.environ.get("MODELRACK_LLAMACPP_SERVER", "llama-server")
 _REQUIRE = os.environ.get("MODELRACK_REQUIRE_LLAMACPP") == "1"
+_ADAPTERS = os.environ.get("MODELRACK_LLAMACPP_ADAPTERS")
+_ADAPTER_BASE = os.environ.get("MODELRACK_LLAMACPP_ADAPTER_BASE")
 _LIVE_PROMPT = "Name one thing a KV cache stores."
 # A thinking model given no output cap spends its whole context on reasoning_content and answers
 # nothing — observed on the reference machine with Qwen3.5 9B at context 4096: 57 s of decoding,
 # an empty `text`. The cap keeps the journey short; the assertions accept reasoning as output.
 _OUTPUT_CAP = SamplingParameters(max_output_tokens=256)
+_CANARY_ADAPTER_COUNT = 2
 
 
 def _skip_or_fail(reason: str) -> None:
@@ -255,3 +271,160 @@ class TestRealServer:
         assert provider.list_resident() == ()
         assert not PosixProcessTable().is_alive(pid), "unload must leave no process behind"
         assert not list(provider.supervisor.state_dir.glob("*.pid.json"))
+
+
+@pytest.fixture(scope="module")
+def adapter_paths() -> list[Path]:
+    if not _ADAPTERS:
+        _skip_or_fail(
+            "I17's semantic canary needs two real LoRA adapter GGUFs for one base. Set "
+            "MODELRACK_LLAMACPP_ADAPTERS to two .gguf paths separated by os.pathsep, and "
+            "MODELRACK_LLAMACPP_ADAPTER_BASE to the model name they were trained on. See "
+            "this class's docstring for how to produce them. No adapter GGUF exists on the "
+            "machine this phase was written on, which is why this skips rather than passes."
+        )
+    paths = [Path(part) for part in (_ADAPTERS or "").split(os.pathsep) if part]
+    missing = [path for path in paths if not path.is_file()]
+    if missing:
+        _skip_or_fail(f"MODELRACK_LLAMACPP_ADAPTERS names files that do not exist: {missing}")
+    if len(paths) < _CANARY_ADAPTER_COUNT:
+        _skip_or_fail(
+            f"The canary needs {_CANARY_ADAPTER_COUNT} adapters; "
+            f"MODELRACK_LLAMACPP_ADAPTERS named {len(paths)}. One adapter cannot show that a "
+            "prefix was not reused across a switch."
+        )
+    if not _ADAPTER_BASE:
+        _skip_or_fail(
+            "Set MODELRACK_LLAMACPP_ADAPTER_BASE to the model name the adapters were trained "
+            "on — the compatibility check is by digest and fails closed, so it has to be the "
+            "base actually served."
+        )
+    return paths
+
+
+@pytest.fixture(scope="module")
+def adapter_provider(
+    model_directory: Path,
+    adapter_paths: list[Path],
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[LlamaCppProvider]:
+    if shutil.which(_SERVER) is None and not Path(_SERVER).is_file():
+        _skip_or_fail(f"{_SERVER!r} is not on PATH; the canary needs a real llama-server.")
+    probe = LlamaCppProvider(
+        model_directory,
+        state_dir=tmp_path_factory.mktemp("canary-probe"),
+        server_path=_SERVER,
+    )
+    base = probe.resolve(_ADAPTER_BASE or "")
+    probe.close()
+    assert base.artifact_digest is not None, "a served base is always digest-bound here"
+    registrations = [
+        AdapterRegistration(
+            name=f"canary-{index}",
+            artifact_path=path,
+            artifact_sha256=sha256_of_file(path),
+            base_model_name=base.provider_model_name,
+            base_artifact_digest=base.artifact_digest,
+            data_classification=DataClassification.CONFIDENTIAL,
+        )
+        for index, path in enumerate(adapter_paths[:_CANARY_ADAPTER_COUNT])
+    ]
+    instance = LlamaCppProvider(
+        model_directory,
+        state_dir=tmp_path_factory.mktemp("canary-state"),
+        adapters=registrations,
+        server_path=_SERVER,
+        startup_timeout_seconds=600.0,
+    )
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
+class TestAdapterCanary:
+    """I17's semantic half: one prompt, two adapters, two different continuations.
+
+    **This is the assertion no fake can make.** The structural half —
+    ``tests/contract/test_adapter_isolation.py`` — proves that ModelRack states the whole adapter
+    configuration on every request and never pins a slot, which is what makes llama-server's own
+    ``lora_should_clear_cache`` reachable. It cannot prove that the *server* then honours it,
+    because a recorded transport has no KV cache to reuse. Only two real adapters on one real base
+    can show that the second request did not continue the first one's prefix.
+
+    **What it needs, precisely, so an operator can produce it without a conversation:**
+
+    * One base GGUF already under ``MODELRACK_LLAMACPP_MODELS`` — any instruct model llama.cpp
+      serves. Name it in ``MODELRACK_LLAMACPP_ADAPTER_BASE`` as the model name this adapter serves
+      it under (its path below the models directory, without ``.gguf``).
+    * **Two** LoRA adapters trained on **that exact base**, converted to GGUF with
+      ``convert_lora_to_gguf.py`` from the llama.cpp tree, and behaviourally distinguishable —
+      two adapters that answer alike prove nothing, so pick two whose styles differ visibly (a
+      terse-answers LoRA and a verbose-explainer LoRA is enough). Any rank works.
+    * ``MODELRACK_LLAMACPP_ADAPTERS`` set to the two ``.gguf`` paths, separated by ``os.pathsep``.
+
+    The digests are computed here rather than declared, and the base is claimed **by digest**, so
+    the run also exercises the fail-closed compatibility check against a real artifact.
+    """
+
+    def test_both_adapters_register_against_the_real_base(
+        self, adapter_provider: LlamaCppProvider
+    ) -> None:
+        """Registration by digest against a real artifact, before anything is generated."""
+        identity = adapter_provider.resolve(_ADAPTER_BASE or "")
+        adapter_provider.generate(
+            GenerationRequest(identity=identity, prompt="hi", sampling=_OUTPUT_CAP)
+        )
+
+        states = adapter_provider.list_adapters()
+        assert len(states) == _CANARY_ADAPTER_COUNT
+        for state in states:
+            assert state.status is AdapterStatus.REGISTERED, state.reason
+            assert state.base_confidence is IdentityConfidence.DIGEST
+            assert state.server_id is not None
+
+    def test_two_adapters_continue_one_prompt_differently(
+        self, adapter_provider: LlamaCppProvider
+    ) -> None:
+        """The canary. Same prompt, same seed, two adapters — and two different answers.
+
+        The prefix is deliberately shared and long enough to be worth caching, so a server that
+        reused adapter A's KV prefix for adapter B would answer *identically*: the failure this
+        test exists to catch looks like agreement, which is why it is written as a difference.
+        The bare base runs last, so its answer is also compared — a bare-base request that
+        inherited an adapter's prefix would match that adapter rather than differ from both.
+        """
+        identity = adapter_provider.resolve(_ADAPTER_BASE or "")
+        sampling = SamplingParameters(max_output_tokens=64, temperature=0.0, seed=7)
+        prompt = (
+            "You are answering a question about caching in transformer inference. "
+            "Consider the key-value cache carefully, then answer in one sentence. "
+            "Question: what does a KV cache store, and why does it help?"
+        )
+
+        answers: dict[str, str] = {}
+        cache_reads: dict[str, object] = {}
+        for name in ("canary-0", "canary-1", None):
+            result = adapter_provider.generate(
+                GenerationRequest(identity=identity, prompt=prompt, adapter=name, sampling=sampling)
+            )
+            answers[name or "bare"] = result.text
+            cache_reads[name or "bare"] = result.usage.tokens.cache_read_tokens
+            if name is not None:
+                assert result.adapter is not None
+                assert result.adapter.name == name
+                assert result.adapter_base_confidence is IdentityConfidence.DIGEST
+            else:
+                assert result.adapter is None
+
+        print(f"\ncanary cache_read by subject: {cache_reads}")  # noqa: T201 — the evidence
+        assert answers["canary-0"] != answers["canary-1"], (
+            "Two adapters produced byte-identical continuations of one prompt at temperature 0. "
+            "Either the adapters are behaviourally identical — pick two that differ — or a prefix "
+            "computed under one was reused for the other, which is exactly what I17 forbids."
+        )
+        assert answers["bare"] not in (answers["canary-0"], answers["canary-1"]), (
+            "The bare base answered exactly as one of the adapters did, which is what a request "
+            "carrying no `lora` field would produce: llama-server restores the launch-time set "
+            "and keeps the slot's prefix."
+        )
