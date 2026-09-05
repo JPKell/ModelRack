@@ -98,3 +98,13 @@ node_modules/
 
 # ---- Build artifacts from docs generation ----
 docs/api/openapi-v1.json.tmp
+
+# ---- Agent / editor tooling (local state, never a build input) ----
+.agents/
+.obsidian/
+.codex/
+.claude/settings.local.json
+
+# ---- import-linter cache ----
+# `lint-imports` writes this on every gate run; it is a cache, never an input.
+.import_linter_cache/
