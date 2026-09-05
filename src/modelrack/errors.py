@@ -40,6 +40,7 @@ __all__ = [
     "ContextLimitExceeded",
     "GenerationCancelled",
     "ModelNotFound",
+    "ProfileMismatch",
     "ProviderError",
     "ProviderProtocolError",
     "ProviderRejected",
@@ -274,3 +275,34 @@ class AdapterNotFound(ProviderError):
     """
 
     code: ClassVar[str] = "ADAPTER_NOT_FOUND"
+
+
+class ProfileMismatch(ProviderError):
+    """A request's :class:`~baseaicore.RuntimeProfile` describes a server that is not the one
+    that would serve it.
+
+    ``details`` carries ``field`` — the profile field that disagrees — ``requested``, ``actual``
+    and ``model_name``, so the mismatch is readable without a second call.
+
+    Today the only field that can raise this is ``adapters_registered``
+    ([ADR-0074](../../docs/adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md) §3): a
+    profile claiming a clean server while adapters sit in the server's VRAM, or claiming a
+    registered one against a server launched with none. ``None`` means *not stated* and disagrees
+    with nothing, so every caller that predates the field is unaffected.
+
+    Refused rather than served because ``profile_hash`` is a persisted lookup key in three
+    databases: serving would record a measurement under a runtime profile that never happened, and
+    a base measured on an adapter-registered server is a different measurement from the same base
+    on a clean one (ADR-0060). This is the ``context_configurable`` discipline
+    ([spec §11.10](../../docs/packages/modelrack/spec.md)) one level up — an adapter that accepted
+    a setting and ignored it produces exactly that kind of run.
+
+    Distinct from :class:`CapabilityUnsupported`: nothing here is beyond the provider. It can serve
+    this request perfectly; it refuses because the caller has described the wrong server, and the
+    fix is to correct the profile or to change the registrations, not to check
+    :meth:`~modelrack.provider.Provider.capabilities`.
+
+    A **permanent** fact about this request as written: retrying changes nothing.
+    """
+
+    code: ClassVar[str] = "PROFILE_MISMATCH"

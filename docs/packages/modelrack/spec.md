@@ -69,11 +69,15 @@ timing means.
 
 ## 5. Dependencies
 
-`baseaicore>=0.4.1`, `httpx>=0.27,<1`. Nothing else. (Not `setspec` — ModelRack's types are
+`baseaicore>=0.4.2`, `httpx>=0.27,<1`. Nothing else. (Not `setspec` — ModelRack's types are
 in-process; applications serialize them, and an adapter manifest is converted to
-`AdapterRegistration` by the application that read the directory.) The `0.4.1` floor is where
-`AdapterIdentity` and `verify_adapter_base_compatibility` live: adapter identity is **used** here,
-never redefined ([ADR-0058](../../adr/0058-the-execution-subject-gains-an-adapter-axis.md)).
+`AdapterRegistration` by the application that read the directory.) The `0.4.1` floor was where
+`AdapterIdentity` and `verify_adapter_base_compatibility` arrived: adapter identity is **used**
+here, never redefined ([ADR-0058](../../adr/0058-the-execution-subject-gains-an-adapter-axis.md)).
+The floor moved to `0.4.2` for `RuntimeProfile.adapters_registered`, which this package compares
+against the running server and refuses when it disagrees
+([ADR-0074](../../adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md)). Both moves are
+floors inside the existing `<0.5` ceiling; the runtime set is unchanged.
 
 ## 6. Consumers
 
@@ -180,6 +184,7 @@ ProviderError               PROVIDER_ERROR
 ├── CapabilityUnsupported   CAPABILITY_UNSUPPORTED
 ├── GenerationCancelled     GENERATION_CANCELLED
 ├── AdapterNotFound         ADAPTER_NOT_FOUND        # named adapter unknown or refused for this base
+├── ProfileMismatch         PROFILE_MISMATCH         # the profile describes a server this is not
 └── ProviderRejected        PROVIDER_REJECTED        # 4xx from the provider, e.g. bad options
 ```
 
@@ -268,6 +273,19 @@ downcasting to a concrete adapter; an adapter that caches nothing accepts it and
    mismatch is a recorded refusal, never an attempt (ADR-0058 rule 5). An adapter registered after
    its base's server started reports `pending_restart` and folds in at the next moment nothing is
    in flight against that server — **never mid-work** (ADR-0062 decision 3).
+15. **A runtime profile that misdescribes the server is refused, not served.**
+   `RuntimeProfile.adapters_registered` is contract 10's discipline one level up: `True` against a
+   server launched with no registrations, and `False` against one launched with them, both raise
+   `ProfileMismatch`. The comparison is against the **launch**, not against what is registered on
+   the provider now — a registration that has arrived and not yet folded in is not in that
+   server's memory. `None` states nothing, disagrees with nothing and is always served, so every
+   caller predating the field is unaffected. Serving instead would record a measurement under a
+   `profile_hash` that never happened, and a base measured on an adapter-registered server is a
+   different measurement from the same base on a clean one
+   ([ADR-0074](../../adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md),
+   [ADR-0060](../../adr/0060-selection-lives-in-the-subject-serving-mode-in-the-profile.md)). The
+   claim is never a launch flag and never part of the launch key: a description of a server must
+   not reconfigure or restart it.
 
 ## 12. Configuration
 
@@ -293,6 +311,7 @@ this package never reads it (ADR-0061 rule 3).
 | An adapter named against a provider declaring `adapter_hot_swap = False` | `CapabilityUnsupported` | Names `adapter_hot_swap`. Never a bare-base generation under the caller's adapter subject |
 | An adapter named that was never registered | `AdapterNotFound` | `details` carries `adapter`, `registered` and `reason = "unknown"` |
 | An adapter refused for the base being served | `AdapterNotFound` | `reason = "incompatible_base"`, with `declared_base_digest` and `served_base_digest` |
+| `runtime_profile.adapters_registered` disagrees with the server that would serve the request | `ProfileMismatch` | `details` carries `field`, `requested`, `actual` and `model_name`. Compared against what the server **was launched with**, never against what is registered on the provider now — those differ exactly while a restart is pending. `None` states nothing and is always served ([ADR-0074](../../adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md) §3) |
 | An adapter compatible but pending a restart, with work in flight | `ProviderUnavailable` | `reason = "restart_pending"`, with `restart_reason` and `in_flight`. **Temporary** — it resolves at the next idle |
 | `provider_options` carries `lora`, a slot pin, or a `--lora*` flag | `ProviderRejected` | Names the key. Each would move the subject behind the record |
 | Cancellation token triggered | `GenerationCancelled` | Partial text preserved in `details`. Only reachable from `stream()`; `generate()` offers no boundary at which a token can take effect, which is why LoadCoach always calls `stream()` and assembles the response itself ([LoadCoach API §5](../../apps/loadcoach/api.md)) |

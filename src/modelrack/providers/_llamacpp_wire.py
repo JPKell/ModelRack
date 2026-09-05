@@ -405,16 +405,26 @@ def build_descriptor(
 def launch_flags(profile: RuntimeProfile) -> tuple[str, ...]:
     """Translate a runtime profile into llama-server command-line flags.
 
-    Every field a profile can carry becomes a launch flag, because on llama-server every one of
-    them is a launch-time property: ``context_size`` → ``--ctx-size``, ``gpu_layers`` →
-    ``--n-gpu-layers``, ``kv_cache_precision`` → ``--cache-type-k`` and ``--cache-type-v``,
-    ``flash_attention`` → ``--flash-attn on|off``, ``threads`` → ``--threads``, ``batch_size`` →
-    ``--batch-size``. A field left ``None`` sends no flag, so the server's own default applies —
+    Every field a profile can carry that *configures* the server becomes a launch flag, because on
+    llama-server every one of them is a launch-time property: ``context_size`` → ``--ctx-size``,
+    ``gpu_layers`` → ``--n-gpu-layers``, ``kv_cache_precision`` → ``--cache-type-k`` and
+    ``--cache-type-v``, ``flash_attention`` → ``--flash-attn on|off``, ``threads`` →
+    ``--threads``, ``batch_size`` → ``--batch-size``. A field left ``None`` sends no flag,
+    so the server's own default applies —
     "provider defaults" is what a default profile means (ADR-0023 §1), and inventing a value
     here would record a profile the run did not use.
 
     ``keep_alive`` has no translation and is stated rather than silently dropped: a supervised
     server stays loaded until ``unload()`` and has no idle-eviction timer in this phase.
+
+    ``adapters_registered`` has no translation either, and for a different reason: it *describes*
+    the server rather than configuring it. The ``--lora`` flags come from this provider's
+    registration set, never from the profile, so turning the claim into a flag would let a caller
+    register an adapter by asserting one existed
+    ([ADR-0074](../../../docs/adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md) §3).
+    It is compared against the running server instead, and a disagreement is
+    :class:`~modelrack.errors.ProfileMismatch`. It is likewise not part of the launch key: a claim
+    about a server must never restart it.
 
     ``provider_options`` keys that start with ``--`` are passed as further flags, sorted by name
     so two equal profiles produce one argv: ``True`` sends the bare flag, ``False`` or ``None``

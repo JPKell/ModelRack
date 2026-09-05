@@ -83,6 +83,7 @@ from modelrack.errors import (
     ContextLimitExceeded,
     GenerationCancelled,
     ModelNotFound,
+    ProfileMismatch,
     ProviderError,
     ProviderProtocolError,
     ProviderRejected,
@@ -637,6 +638,11 @@ class LlamaCppProvider:
         self._registrations: dict[str, AdapterRegistration] = {}
         # Per running server: what it registered, and what launch-time verification decided.
         self._server_adapters: dict[str, tuple[ServerAdapter, ...]] = {}
+        # Whether the server was *launched with* `--lora` flags — argv truth, which is what a
+        # runtime profile describes. Deliberately not derived from `_server_adapters`: that is the
+        # set the server reported back, and it is empty both when nothing was launched and when
+        # `/lora-adapters` could not be read, which are different facts about memory.
+        self._launched_with_adapters: dict[str, bool] = {}
         self._verifications: dict[str, dict[str, _Verification]] = {}
         # Per running server: how many requests are using it right now. A restart waits on this.
         self._in_flight: dict[str, int] = {}
@@ -1009,6 +1015,10 @@ class LlamaCppProvider:
         Raises:
             ModelNotFound: If no base model has that name, or its digest does not match a
                 pinned one.
+            ProfileMismatch: If ``profile.adapters_registered`` states an adapter-serving mode
+                that is not the one this call would produce — ``True`` with nothing registered for
+                this base, or ``False`` with registrations that would reach the argv. ``None``
+                states nothing and is always served (ADR-0074 §3).
             ProviderUnavailable: If the binary cannot be launched, no port is free, or the
                 server exited before it was healthy — ``details`` carries the reason, the argv,
                 and for an exit the code and the captured stderr tail.
@@ -1021,6 +1031,11 @@ class LlamaCppProvider:
             handle = self._supervisor.handle_for(entry.name)
             key = self._launch_key(entry, profile)
             if handle is not None and handle.launch_key == key:
+                self._refuse_misdescribed_profile(
+                    entry.name,
+                    profile,
+                    adapters_registered=self._launched_with_adapters.get(entry.name, False),
+                )
                 return LoadResult(
                     identity=identity,
                     already_resident=True,
@@ -1127,6 +1142,8 @@ class LlamaCppProvider:
                 ADR-0007 rule 2 forbids.
             ContextLimitExceeded: If the server reports the request exceeds its context, with
                 the requested and served sizes where the server stated them.
+            ProfileMismatch: If ``runtime_profile.adapters_registered`` disagrees with what the
+                server that would serve this request was launched with (ADR-0074 §3).
             ProviderRejected: If the server understood the request and refused it.
             ProviderUnavailable: If the server could not be spawned, exited, or is still loading.
             ProviderProtocolError: If the response cannot be parsed.
@@ -1189,6 +1206,8 @@ class LlamaCppProvider:
             ModelNotFound: If the model is not under the directory, or a pinned digest differs.
             ContextLimitExceeded: If the server refuses the request as too large, before any
                 content arrives.
+            ProfileMismatch: If ``runtime_profile.adapters_registered`` disagrees with what the
+                server that would serve this request was launched with (ADR-0074 §3).
             ProviderRejected: If the server refuses the request before streaming.
             ProviderUnavailable: If the server could not be spawned or is unreachable.
             ProviderTimeout: If it does not answer in time.
@@ -1307,7 +1326,17 @@ class LlamaCppProvider:
                 )
                 self._terminate(handle)
                 handle = None
-            if handle is None:
+            if handle is not None:
+                # A server that is being reused: what it was *launched* with is the fact the
+                # profile has to match, and a registration that arrived since and has not been
+                # folded in is not on this server. `_spawn` makes the same check for a server that
+                # does not exist yet.
+                self._refuse_misdescribed_profile(
+                    entry.name,
+                    request.runtime_profile,
+                    adapters_registered=self._launched_with_adapters.get(entry.name, False),
+                )
+            else:
                 handle = self._spawn(entry, request.identity, request.runtime_profile)
             return handle
 
@@ -1332,6 +1361,46 @@ class LlamaCppProvider:
                 "restart_reason": restart_reason,
                 "model_name": model_name,
                 "in_flight": in_flight,
+            },
+        )
+
+    @staticmethod
+    def _refuse_misdescribed_profile(
+        model_name: str, profile: RuntimeProfile, *, adapters_registered: bool
+    ) -> None:
+        """Refuse a profile whose ``adapters_registered`` is not true of the server in question.
+
+        The comparison is against what the server **was launched with**, never against what is
+        registered on this provider now: a registration that arrived after the server started and
+        has not yet been folded in is not in that server's memory, and a profile claiming it would
+        record a run that did not happen.
+
+        Args:
+            model_name: The base whose server is being described, for the message and ``details``.
+            profile: The caller's runtime profile.
+            adapters_registered: Whether that server's argv carried ``--lora``.
+
+        Raises:
+            ProfileMismatch: When the profile **states** an adapter-serving mode that is not this
+                server's. ``adapters_registered=None`` states nothing, disagrees with nothing and
+                is always served, so every caller predating the field is unaffected
+                (ADR-0074 §3).
+        """
+        stated = profile.adapters_registered
+        if stated is None or stated == adapters_registered:
+            return
+        raise ProfileMismatch(
+            f"The runtime profile says adapters_registered={stated} for {model_name!r}, but the "
+            f"server that would serve this request was launched with "
+            f"{'adapters' if adapters_registered else 'no adapters'} registered. A base measured "
+            "on an adapter-registered server is a different measurement from the same base on a "
+            "clean one, so serving would record a profile hash that never happened. Correct the "
+            "profile, or change this provider's registrations.",
+            details={
+                "field": "adapters_registered",
+                "requested": stated,
+                "actual": adapters_registered,
+                "model_name": model_name,
             },
         )
 
@@ -1377,6 +1446,9 @@ class LlamaCppProvider:
                         "reason": verification.reason,
                     },
                 )
+        # Before the process exists: a profile that misdescribes the server this call is about to
+        # launch is refused here, so the refusal costs no spawn.
+        self._refuse_misdescribed_profile(entry.name, profile, adapters_registered=bool(registered))
         self._events.started(operation="load", model_name=entry.name, metadata={})
         try:
             handle = self._supervisor.spawn(
@@ -1402,6 +1474,7 @@ class LlamaCppProvider:
             )
             raise
         self._identities[entry.name] = identity if identity.artifact_digest is not None else served
+        self._launched_with_adapters[entry.name] = bool(registered)
         self._verifications[entry.name] = verifications
         self._read_props(handle)
         self._server_adapters[entry.name] = self._read_registered_adapters(handle, registered)
@@ -1434,6 +1507,7 @@ class LlamaCppProvider:
         """
         self._identities.pop(model_name, None)
         self._server_adapters.pop(model_name, None)
+        self._launched_with_adapters.pop(model_name, None)
         self._verifications.pop(model_name, None)
 
     def _launch_key(self, entry: _Entry, profile: RuntimeProfile) -> str:

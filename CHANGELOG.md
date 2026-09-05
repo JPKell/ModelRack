@@ -8,6 +8,24 @@ packaging and release standards §3.
 ## [Unreleased]
 
 ### Added
+- **A runtime profile that misdescribes the server is refused**
+  ([ADR-0074](docs/adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md), implementing
+  ADR-0060). `baseaicore 0.4.2` adds `RuntimeProfile.adapters_registered: bool | None`, and
+  `LlamaCppProvider` now compares it against the server that would serve the request: `True`
+  against a server launched with no registrations, and `False` against one launched with them,
+  both raise the new **`ProfileMismatch`** (`PROFILE_MISMATCH`), carrying `field`, `requested`,
+  `actual` and `model_name`.
+
+  The comparison is against what the server **was launched with**, never against what is
+  registered on the provider now — those differ exactly while a restart is pending, and a
+  registration that has not folded in is not in that server's memory. `None` states nothing,
+  disagrees with nothing and is always served, so **every caller that predates the field is
+  unaffected**. The claim is never turned into a launch flag and is not part of the launch key: a
+  description of a server must not reconfigure or restart it.
+
+  Refused rather than served because `profile_hash` is a persisted key in three databases, and a
+  base measured on an adapter-registered server is a different measurement from the same base on a
+  clean one. Serving would merge the two silently.
 - **LoRA adapters on `LlamaCppProvider`**: one warm base serves several adapters, selected per
   request, with no reload between them (ADR-0062, adapter roadmap §4.1 P7). An application hands
   over `AdapterRegistration` objects — at construction or through `register_adapters()` — built
@@ -101,9 +119,11 @@ packaging and release standards §3.
   adapter.
 
 ### Changed
-- The `baseaicore` floor moves to **`>=0.4.1`** (still `<0.5`), which is where `AdapterIdentity`
-  and `verify_adapter_base_compatibility` live. The dependency *set* is unchanged: `baseaicore`
-  and `httpx`, and `.importlinter` was not touched.
+- The `baseaicore` floor moves to **`>=0.4.2`** (still `<0.5`) — through `>=0.4.1`, which is where
+  `AdapterIdentity` and `verify_adapter_base_compatibility` arrived, to `>=0.4.2`, which is where
+  `RuntimeProfile.adapters_registered` does. The dependency *set* is unchanged: `baseaicore` and
+  `httpx`, and `.importlinter` was not touched. **`baseaicore 0.4.2` must be on PyPI before this
+  release is published**, or the floor is unresolvable for anyone installing from the index.
 - A request to a llama-server that has adapters registered now carries a complete `lora` field
   even when it names no adapter. This is a correctness fix, not a nicety: llama-server treats an
   absent `lora` as "restore the launch-time set" and takes that branch **without** clearing the

@@ -19,6 +19,7 @@ from modelrack.errors import (
     ContextLimitExceeded,
     GenerationCancelled,
     ModelNotFound,
+    ProfileMismatch,
     ProviderError,
     ProviderProtocolError,
     ProviderRejected,
@@ -39,6 +40,7 @@ _SPEC_CODES = {
     GenerationCancelled: "GENERATION_CANCELLED",
     ProviderRejected: "PROVIDER_REJECTED",
     AdapterNotFound: "ADAPTER_NOT_FOUND",
+    ProfileMismatch: "PROFILE_MISMATCH",
 }
 
 

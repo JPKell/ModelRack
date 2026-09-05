@@ -40,6 +40,7 @@ from modelrack import (
     CapabilityUnsupported,
     GenerationRequest,
     Message,
+    ProfileMismatch,
     ProviderRejected,
     ProviderUnavailable,
     ProviderUnavailableReason,
@@ -910,3 +911,182 @@ class TestPendingRestartAndTheInFlightGuard:
 
         assert state.status is AdapterStatus.AWAITING_BASE
         assert state.reason is None
+
+
+# ------------------------------------------------------------- the profile describes the server
+
+
+class TestTheProfileMustDescribeTheServer:
+    """ADR-0074 §3: `adapters_registered` states how the server was launched, and a statement that
+    is not true of the server that would serve the request is refused rather than served.
+
+    The comparison is against the **launch**, never against what is registered on the provider
+    now: those differ exactly while a restart is pending, and that gap is where a run would
+    otherwise be recorded under a profile hash describing a server that never existed.
+    """
+
+    def test_a_profile_that_does_not_mention_the_field_is_served(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        registration: Callable[..., AdapterRegistration],
+    ) -> None:
+        """The compatibility case, and the one every caller predating the field hits."""
+        provider = make_provider(adapters=[registration()])
+        try:
+            result = provider.generate(_request())
+            assert result.text
+            assert _request().runtime_profile.adapters_registered is None
+        finally:
+            provider.close()
+
+    def test_none_is_served_against_a_clean_server_too(
+        self, make_provider: Callable[..., LlamaCppProvider]
+    ) -> None:
+        provider = make_provider()
+        try:
+            assert provider.generate(
+                _request(runtime_profile=RuntimeProfile(adapters_registered=None))
+            ).text
+        finally:
+            provider.close()
+
+    def test_claiming_adapters_against_a_clean_server_is_refused(
+        self, make_provider: Callable[..., LlamaCppProvider], launcher: FakeLauncher
+    ) -> None:
+        """And it costs no process: the refusal happens before the server is spawned."""
+        provider = make_provider()
+        try:
+            with pytest.raises(ProfileMismatch) as raised:
+                provider.generate(
+                    _request(runtime_profile=RuntimeProfile(adapters_registered=True))
+                )
+
+            assert raised.value.code == "PROFILE_MISMATCH"
+            assert raised.value.details["field"] == "adapters_registered"
+            assert raised.value.details["requested"] is True
+            assert raised.value.details["actual"] is False
+            assert raised.value.details["model_name"] == _MODEL
+            assert launcher.specs == []
+        finally:
+            provider.close()
+
+    def test_claiming_a_clean_server_against_a_registered_one_is_refused(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        registration: Callable[..., AdapterRegistration],
+        launcher: FakeLauncher,
+    ) -> None:
+        provider = make_provider(adapters=[registration()])
+        try:
+            with pytest.raises(ProfileMismatch) as raised:
+                provider.generate(
+                    _request(runtime_profile=RuntimeProfile(adapters_registered=False))
+                )
+
+            assert raised.value.details["requested"] is False
+            assert raised.value.details["actual"] is True
+            assert launcher.specs == []
+        finally:
+            provider.close()
+
+    @pytest.mark.parametrize(
+        ("registered", "stated"), [(False, False), (True, True)], ids=["clean", "registered"]
+    )
+    def test_a_profile_that_matches_the_server_is_served(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        registration: Callable[..., AdapterRegistration],
+        registered: bool,
+        stated: bool,
+    ) -> None:
+        provider = make_provider(adapters=[registration()] if registered else [])
+        try:
+            assert provider.generate(
+                _request(runtime_profile=RuntimeProfile(adapters_registered=stated))
+            ).text
+        finally:
+            provider.close()
+
+    def test_a_running_server_is_judged_by_what_it_was_launched_with(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        registration: Callable[..., AdapterRegistration],
+        launcher: FakeLauncher,
+    ) -> None:
+        """The interesting case: a registration has arrived but has not been folded in.
+
+        A stream is held open, so the pending adapter cannot fold in — the server in memory is
+        still the clean one it was launched as. `adapters_registered=True` describes the provider's
+        configuration, not that server, and is refused. When the stream finishes and the restart
+        happens, the same profile is served.
+        """
+        provider = make_provider()
+        try:
+            provider.generate(_request())
+            events = provider.stream(_request())
+            first = next(iter(events))  # in flight: the fold-in cannot happen
+            assert first is not None
+            provider.register_adapters([registration()])
+
+            with pytest.raises(ProfileMismatch) as raised:
+                provider.generate(
+                    _request(runtime_profile=RuntimeProfile(adapters_registered=True))
+                )
+            assert raised.value.details["actual"] is False
+            assert len(launcher.specs) == 1  # the refusal restarted nothing
+
+            rest = list(events)
+            assert isinstance(rest[-1], StreamCompleted)
+
+            # Idle now: the adapter folds in, and the same profile is the true one.
+            assert provider.generate(
+                _request(runtime_profile=RuntimeProfile(adapters_registered=True))
+            ).text
+            assert len(launcher.specs) == 2
+        finally:
+            provider.close()
+
+    def test_load_refuses_a_misdescribing_profile_before_it_spawns(
+        self, make_provider: Callable[..., LlamaCppProvider], launcher: FakeLauncher
+    ) -> None:
+        """`load` records a `profile_hash` too, so it refuses on the same terms as `generate`."""
+        provider = make_provider()
+        try:
+            with pytest.raises(ProfileMismatch):
+                provider.load(_identity(), RuntimeProfile(adapters_registered=True))
+            assert launcher.specs == []
+        finally:
+            provider.close()
+
+    def test_load_refuses_against_an_already_resident_server(
+        self, make_provider: Callable[..., LlamaCppProvider], launcher: FakeLauncher
+    ) -> None:
+        """The already-resident path returns a LoadResult carrying a profile_hash — same rule."""
+        provider = make_provider()
+        try:
+            assert not provider.load(_identity(), RuntimeProfile()).already_resident
+            with pytest.raises(ProfileMismatch) as raised:
+                provider.load(_identity(), RuntimeProfile(adapters_registered=True))
+            assert raised.value.details["actual"] is False
+            assert len(launcher.specs) == 1
+        finally:
+            provider.close()
+
+    def test_the_claim_is_not_a_launch_flag_and_does_not_restart_a_server(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        registration: Callable[..., AdapterRegistration],
+        launcher: FakeLauncher,
+    ) -> None:
+        """A description of a server must never reconfigure it, or asserting would register."""
+        provider = make_provider(adapters=[registration()])
+        try:
+            provider.generate(_request(runtime_profile=RuntimeProfile(adapters_registered=True)))
+            provider.generate(_request())
+
+            assert len(launcher.specs) == 1
+            argv = _launch_argv(launcher)
+            assert "--adapters-registered" not in argv
+            assert not any("adapters_registered" in item for item in argv)
+        finally:
+            provider.close()
