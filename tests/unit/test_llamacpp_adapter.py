@@ -16,6 +16,9 @@ Four properties carry their own acceptance criteria beyond the conformance suite
   :class:`TestResidency`.
 * **Both streams end on their own terminal rule** — ``[DONE]`` for chat, ``stop: true`` for the
   native endpoint — and anything else is a truncation — :class:`TestStreaming`.
+* **A cancelled stream leaves a usable server and no claim on it, and repeated cycles leave no
+  process, pid file or handle behind** —
+  :class:`TestCancellationUnderSupervisionAndLeaks` (Phase 8).
 """
 
 from __future__ import annotations
@@ -1760,3 +1763,198 @@ class TestStreaming:
             break
 
         assert provider.generate(_request()).text
+
+
+class TestCancellationUnderSupervisionAndLeaks:
+    """Phase 8: what a cancelled stream leaves behind, and what twenty cycles leave behind.
+
+    The distinction from :class:`TestStreaming`'s cancellation test is the *server*. There the
+    question was what the caller receives; here it is what the process, the claim on it and the
+    state directory look like afterwards — the half that only exists because this adapter
+    supervises something.
+
+    The in-flight claim is never read directly. It is asserted through the behaviour it governs:
+    a restart refuses while work is in flight, so a restart that *succeeds* is proof the claim
+    was released. An assertion on the private counter would pass even if `_require_idle` stopped
+    consulting it.
+    """
+
+    def test_a_cancelled_stream_leaves_the_server_running_and_usable(
+        self, provider: LlamaCppProvider, launcher: FakeLauncher, server: _FakeServer
+    ) -> None:
+        server()
+        token = CancellationToken()
+        events: list[StreamEvent] = []
+        for event in provider.stream(_request(cancel=token)):
+            events.append(event)
+            if len(_text_deltas(events)) == 2:
+                token.cancel()
+
+        assert isinstance(events[-1], StreamFailed)
+        assert isinstance(events[-1].error, GenerationCancelled)
+        # The process is untouched: a cancelled request is the caller's business, not the
+        # server's failure, and killing it would make every cancellation cost a reload.
+        assert not launcher.processes[0].terminated
+        assert [r.identity.provider_model_name for r in provider.list_resident()] == [_MODEL]
+        # Usable, asserted by using it — not by the absence of a complaint.
+        assert provider.generate(_request()).text
+        assert len(launcher.specs) == 1  # served by the same process, not a fresh one
+
+    def test_a_cancelled_stream_returns_the_in_flight_claim_to_zero(
+        self, provider: LlamaCppProvider, launcher: FakeLauncher, server: _FakeServer
+    ) -> None:
+        """Proved by a restart, which is the operation that refuses while work is in flight."""
+        server()
+        server(port=_PORT + 1)
+        token = CancellationToken()
+        for event in provider.stream(_request(cancel=token, runtime_profile=RuntimeProfile())):
+            if isinstance(event, TokenDelta):
+                token.cancel()
+
+        # A different profile forces `_require_idle`: it raises RESTART_PENDING if the cancelled
+        # stream still holds its lease.
+        provider.generate(_request(runtime_profile=RuntimeProfile(context_size=4096)))
+
+        assert launcher.processes[0].terminated
+        assert len(launcher.specs) == 2
+
+    def test_an_abandoned_stream_releases_the_claim_too(
+        self, provider: LlamaCppProvider, launcher: FakeLauncher, server: _FakeServer
+    ) -> None:
+        """A generator dropped mid-stream is the case a `finally` has to carry, not a `return`."""
+        server()
+        server(port=_PORT + 1)
+        events = provider.stream(_request())
+        next(iter(events))
+        del events
+        gc.collect()
+
+        provider.generate(_request(runtime_profile=RuntimeProfile(context_size=4096)))
+
+        assert launcher.processes[0].terminated
+        assert len(launcher.specs) == 2
+
+    def test_a_failed_stream_releases_the_claim_too(
+        self, provider: LlamaCppProvider, launcher: FakeLauncher, server: _FakeServer
+    ) -> None:
+        server(chat_stream="chat_stream_truncated.sse")
+        server(port=_PORT + 1)
+        terminal = list(provider.stream(_request()))[-1]
+        assert isinstance(terminal, StreamFailed)
+
+        provider.generate(_request(runtime_profile=RuntimeProfile(context_size=4096)))
+
+        assert len(launcher.specs) == 2
+
+    def test_a_cancellation_that_lands_on_the_terminal_event_still_reports_cancelled(
+        self,
+        provider: LlamaCppProvider,
+        server: _FakeServer,
+        load_llamacpp_fixture: Callable[[str], Any],
+    ) -> None:
+        """The race the post-loop check exists for, made deterministic.
+
+        `cancel()` normally fires from another thread, so it can land in the window between the
+        top-of-loop check on the terminal event and the check after the loop. A token that flips
+        on a chosen read reproduces exactly that window without a thread, and without it the
+        branch is unreachable and untested — a stream the caller stopped would be reported as
+        completed.
+        """
+
+        class _FlipsOnRead(CancellationToken):
+            """Cancelled from the ``nth`` read onwards, which models the concurrent flip."""
+
+            def __init__(self, *, nth: int) -> None:
+                super().__init__()
+                self._reads = 0
+                self._nth = nth
+
+            @property
+            def is_cancelled(self) -> bool:
+                self._reads += 1
+                return self._reads >= self._nth
+
+        server()
+        # The token is read once before the server is spawned and once at the top of each SSE
+        # event, `[DONE]` included; the read after the loop is therefore the next one. Derived
+        # from the fixture rather than hardcoded, so an added chunk moves it rather than quietly
+        # putting the flip back inside the loop, where the branch under test is not the one taken.
+        body = load_llamacpp_fixture("chat_stream.sse")
+        events_in_body = sum(1 for line in body.splitlines() if line.startswith("data:"))
+        token = _FlipsOnRead(nth=events_in_body + 2)
+
+        events = list(provider.stream(_request(cancel=token)))
+
+        terminal = events[-1]
+        assert isinstance(terminal, StreamFailed)
+        assert isinstance(terminal.error, GenerationCancelled)
+        assert terminal.partial_text == "A KV cache stores keys and values."
+
+    def test_twenty_load_unload_cycles_leave_nothing_behind(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        launcher: FakeLauncher,
+        table: FakeProcessTable,
+        server: _FakeServer,
+        tmp_path: Path,
+    ) -> None:
+        """No orphan process, no pid file, no handle — asserted through the injected fakes.
+
+        The process table is the orphan-recovery channel rather than the termination one, so it is
+        asserted the way it is actually used: after twenty cycles a sweep finds nothing to recover,
+        which is the same question ("is there a live server nobody is tracking?") asked from the
+        side a *new* supervisor would ask it from. The flat-memory half of this needs a real server
+        and is an operator step (development plan, Phase 8).
+        """
+        for offset in range(4):
+            server(port=_PORT + offset)
+        provider = make_provider()
+        state_dir = tmp_path / "state"
+        try:
+            for _ in range(20):
+                provider.load(_identity(), RuntimeProfile())
+                assert len(list(state_dir.glob("*.pid.json"))) == 1
+                assert provider.unload(_identity()) is True
+                assert list(state_dir.glob("*.pid.json")) == []
+        finally:
+            provider.close()
+
+        assert len(launcher.processes) == 20
+        assert all(process.terminated for process in launcher.processes)
+        assert launcher.live == []
+        assert provider.supervisor.handles() == ()
+        assert provider.list_resident() == ()
+        assert provider.supervisor.sweep_orphans() == ()
+        assert table.signals == []  # nothing was left for the sweep to signal
+
+    def test_twenty_generate_cycles_reuse_one_server_and_leave_it_alone(
+        self, provider: LlamaCppProvider, launcher: FakeLauncher, server: _FakeServer
+    ) -> None:
+        """The other twenty: the same server serves them all, and no claim accumulates."""
+        server()
+        server(port=_PORT + 1)
+        for _ in range(20):
+            assert provider.generate(_request()).text
+
+        assert len(launcher.specs) == 1
+        # And the claim is at zero at the end: a restart is allowed.
+        provider.generate(_request(runtime_profile=RuntimeProfile(context_size=4096)))
+        assert len(launcher.specs) == 2
+
+    def test_a_dropped_provider_releases_a_stream_it_still_owned(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        launcher: FakeLauncher,
+        server: _FakeServer,
+    ) -> None:
+        """The last resort: a caller that neither drained the stream nor closed the provider."""
+        server()
+        instance = make_provider()
+        events = instance.stream(_request())
+        next(iter(events))
+
+        del events
+        del instance
+        gc.collect()
+
+        assert launcher.processes[0].terminated

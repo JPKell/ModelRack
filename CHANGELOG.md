@@ -8,6 +8,11 @@ packaging and release standards §3.
 ## [Unreleased]
 
 ### Added
+- **A cancelled stream is now proved to leave a usable server behind, not only a correct result.**
+  The existing cancellation tests asked what the caller receives; these ask what the supervised
+  process, the claim on it and the state directory look like afterwards. Twenty `load`/`unload`
+  cycles leave no process, no pid file, no handle and nothing for an orphan sweep to recover.
+  Behaviour is unchanged — this is the half of Phase 8 that turns statements into assertions.
 - **A runtime profile that misdescribes the server is refused**
   ([ADR-0074](docs/adr/0074-adapter-enabled-serving-is-a-runtime-profile-field.md), implementing
   ADR-0060). `baseaicore 0.4.2` adds `RuntimeProfile.adapters_registered: bool | None`, and
@@ -117,6 +122,13 @@ packaging and release standards §3.
   reads only the former and vLLM only the latter, and each ignores the other, so a caller's
   `SamplingParameters.repeat_penalty` was silently dropped by a llama-server reached through this
   adapter.
+
+### Fixed
+- A `llama.cpp` stream whose cancellation token fires in the window between the terminal SSE event
+  and the check after the stream loop is reported as **cancelled** rather than completed. The
+  branch existed and was correct; it was marked unreachable and untested, because it needs a
+  cancellation that lands from another thread. It is now covered by a token that flips on a chosen
+  read, which reproduces that window deterministically, and the `pragma: no cover` is gone.
 
 ### Changed
 - The `baseaicore` floor moves to **`>=0.4.2`** (still `<0.5`) — through `>=0.4.1`, which is where

@@ -2199,10 +2199,11 @@ class LlamaCppProvider:
 
             if not completed:  # pragma: no cover — the `else` above always returns first
                 raise AssertionError("stream loop exited without completing or returning")
-            if cancel is not None and cancel.is_cancelled:  # pragma: no cover — see the sibling
-                # Reachable only if cancel() fires from another thread between the top-of-loop
-                # check on the terminal event and this one; the terminal event is its own SSE
-                # event on both shapes, so a single-threaded test cannot land here.
+            if cancel is not None and cancel.is_cancelled:
+                # The narrow window: cancel() fired between the top-of-loop check on the terminal
+                # event and this one. Normally that means another thread; the test reproduces it
+                # deterministically with a token that flips on a chosen read, because without
+                # this branch a stream the caller stopped would be reported as completed.
                 yield self._cancelled(answer.getvalue())
                 return
             wall_ms = elapsed_ms(start_ns, self._monotonic())
