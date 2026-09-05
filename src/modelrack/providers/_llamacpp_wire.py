@@ -106,6 +106,7 @@ __all__ = [
     "header_kind",
     "identity_for",
     "is_shard",
+    "shard_group_name",
     "launch_flags",
     "lora_field",
     "model_name_for",
@@ -252,11 +253,31 @@ def model_name_for(path: Path, *, root: Path) -> str:
 def is_shard(path: Path) -> bool:
     """Report whether a file is one shard of a split GGUF (``…-00002-of-00003.gguf``).
 
-    Split files are not served in this phase: their identity is a hash over several files and
-    llama-server is handed only the first, so listing each shard as a model would be wrong twice
-    over. They are skipped at discovery with a DEBUG log rather than misdescribed.
+    Split files are not served: their identity is a hash over several files and llama-server is
+    handed only the first, so listing each shard as a model would be wrong twice over. They are
+    left out of discovery rather than misdescribed — but a reference that names one is **refused
+    by name** rather than reported as absent, because a model an operator can see on disk and
+    cannot explain the absence of is worse than a refusal (:func:`shard_group_name`).
     """
     return _SHARD_PATTERN.search(path.name) is not None
+
+
+def shard_group_name(path: Path) -> str | None:
+    """Return the name the shards of one split GGUF share, or ``None`` for any other file.
+
+    ``big-00002-of-00003.gguf`` → ``"big"``. The group name is what an operator would call the
+    model, which is what makes a refusal nameable: the shards are on disk under names nobody
+    typed, and the thing they were asked for is the group.
+
+    Args:
+        path: Any file under the model directory.
+
+    Returns:
+        The shared stem, or ``None`` when the filename does not carry a ``-NNNNN-of-NNNNN``
+        suffix.
+    """
+    match = _SHARD_PATTERN.search(path.name)
+    return path.name[: match.start()] if match is not None else None
 
 
 def header_kind(header: GgufHeader) -> str:

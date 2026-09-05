@@ -306,6 +306,7 @@ this package never reads it (ADR-0061 rule 3).
 | Read/connect timeout | `ProviderTimeout` | Includes elapsed time and the limit |
 | Non-JSON or unexpected JSON | `ProviderProtocolError` | Raw body attached in `details` (truncated), for the caller to store as an artifact |
 | 404 / model missing | `ModelNotFound` | Includes the reference and the known model count |
+| A reference names a **split GGUF** (`…-00001-of-00003.gguf`) | `ModelNotFound` | `reason = "sharded"`, with `model_name` (the group), `shard_count` and `shards`, and what to do instead. Split bases are not served — identity would be a hash over several files while llama-server is handed only the first — but they are on disk under the name that was asked for, so the refusal names them rather than reporting them absent (D3 finding 6) |
 | Provider reports a context overflow | `ContextLimitExceeded` | Includes requested and maximum where known |
 | Tools/schema requested but unsupported | `CapabilityUnsupported` | Names the capability |
 | An adapter named against a provider declaring `adapter_hot_swap = False` | `CapabilityUnsupported` | Names `adapter_hot_swap`. Never a bare-base generation under the caller's adapter subject |

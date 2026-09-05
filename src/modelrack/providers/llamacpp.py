@@ -146,7 +146,6 @@ from modelrack.providers._llamacpp_wire import (
     completion_finish_reason,
     header_kind,
     identity_for,
-    is_shard,
     launch_flags,
     lora_field,
     model_name_for,
@@ -157,6 +156,7 @@ from modelrack.providers._llamacpp_wire import (
     read_error,
     read_lora_adapters,
     read_served_context,
+    shard_group_name,
 )
 from modelrack.providers._openai_wire import (
     finish_reason_for,
@@ -634,6 +634,9 @@ class LlamaCppProvider:
             stderr_tail_bytes=DEFAULT_STDERR_TAIL_BYTES,
         )
         self._identities: dict[str, ModelIdentity] = {}
+        # Split GGUFs found at the last discovery: group name -> its shards, in filename order.
+        # Not served, but named, so a reference to one is refused rather than reported absent.
+        self._shard_groups: dict[str, tuple[Path, ...]] = {}
         # Registration order is server-id order, so a dict (insertion-ordered) is the record.
         self._registrations: dict[str, AdapterRegistration] = {}
         # Per running server: what it registered, and what launch-time verification decided.
@@ -1593,11 +1596,15 @@ class LlamaCppProvider:
                 },
             ) from exc
         entries: dict[str, _Entry] = {}
+        shards: dict[str, list[Path]] = {}
         for path in paths:
-            if is_shard(path):
+            stem = shard_group_name(path)
+            if stem is not None:
                 logger.debug(
                     "llamacpp.discovery.skipped", extra={"path": str(path), "reason": "shard"}
                 )
+                group = model_name_for(path.with_name(f"{stem}.gguf"), root=self._model_directory)
+                shards.setdefault(group, []).append(path)
                 continue
             try:
                 snapshot = self._header_snapshot(path, refresh=refresh)
@@ -1617,6 +1624,7 @@ class LlamaCppProvider:
             entries[name] = _Entry(
                 name=name, path=path, header=snapshot.header, observed_at=snapshot.observed_at
             )
+        self._shard_groups = {group: tuple(paths) for group, paths in sorted(shards.items())}
         return dict(sorted(entries.items()))
 
     def _header_snapshot(self, path: Path, *, refresh: bool) -> _HeaderSnapshot:
@@ -1654,11 +1662,53 @@ class LlamaCppProvider:
             observed_at=entry.observed_at,
         )
 
+    def _refuse_sharded(self, reference: str) -> None:
+        """Refuse a reference that names a split GGUF, by name and with what to do instead.
+
+        Consults the groups the last discovery recorded, so it never rescans the directory.
+
+        Args:
+            reference: What the caller asked for. Matched against a group name in both
+                directions, so ``big`` and ``big-00001-of-00002`` both land here.
+
+        Raises:
+            ModelNotFound: With ``reason`` ``"sharded"``, the shard count and the shard paths,
+                when the reference names a split GGUF. A split base is not served — its identity
+                would be a hash over several files, and llama-server is handed only the first —
+                but it is on disk under the name that was asked for, and a plain "no such model"
+                leaves an operator looking at a file the adapter will not explain.
+        """
+        wanted = reference.removesuffix(".gguf")
+        for group, paths in self._shard_groups.items():
+            if not (wanted == group or wanted.startswith(group) or group.startswith(wanted)):
+                continue
+            raise ModelNotFound(
+                f"{group!r} is a split GGUF of {len(paths)} shards, and this adapter does not "
+                "serve split models: their identity would be a hash over several files while "
+                "llama-server is handed only the first, so the digest recorded against a run "
+                "would not describe the weights that answered. Merge the shards "
+                "(`llama-gguf-split --merge`) or use a single-file quantization.",
+                details={
+                    "reference": reference,
+                    "known_model_count": len(self._entries(refresh=False)),
+                    "reason": "sharded",
+                    "model_name": group,
+                    "shard_count": len(paths),
+                    "shards": [str(path) for path in paths],
+                },
+            )
+
     def _entry_named(self, name: str, *, refresh: bool) -> _Entry:
-        """Return the entry served under exactly ``name``, or raise ``ModelNotFound``."""
+        """Return the entry served under exactly ``name``, or raise ``ModelNotFound``.
+
+        Raises:
+            ModelNotFound: If nothing is served under that name — with ``reason`` ``"sharded"``
+                and the shard list where the name is a split GGUF's.
+        """
         entries = self._entries(refresh=refresh)
         entry = entries.get(name)
         if entry is None:
+            self._refuse_sharded(name)
             raise ModelNotFound(
                 f"No model named {name!r} is served from {str(self._model_directory)!r}.",
                 details={"reference": name, "known_model_count": len(entries)},
@@ -1684,9 +1734,14 @@ class LlamaCppProvider:
                 )
         return entry
 
-    @staticmethod
-    def _resolve_name(reference: str, entries: Mapping[str, _Entry]) -> str:
-        """Resolve a reference to one served name: exact, filename, then a unique prefix."""
+    def _resolve_name(self, reference: str, entries: Mapping[str, _Entry]) -> str:
+        """Resolve a reference to one served name: exact, filename, then a unique prefix.
+
+        Raises:
+            ModelNotFound: If the reference matches no served model or more than one — with
+                ``reason`` ``"sharded"`` where it names a split GGUF, which is on disk and would
+                otherwise be reported as simply absent.
+        """
         if reference in entries:
             return reference
         stripped = reference.removesuffix(".gguf")
@@ -1706,6 +1761,7 @@ class LlamaCppProvider:
                     "matched_model_count": len(prefixed),
                 },
             )
+        self._refuse_sharded(reference)
         raise ModelNotFound(
             f"No model matching {reference!r} is served from the model directory.",
             details={"reference": reference, "known_model_count": len(entries)},

@@ -8,6 +8,14 @@ packaging and release standards §3.
 ## [Unreleased]
 
 ### Added
+- **A split GGUF is refused by name rather than reported absent.** A sharded base
+  (`big-00001-of-00002.gguf`) is still not served — its identity would be a hash over several
+  files while llama-server is handed only the first — and still does not appear in `list_models()`.
+  But a reference to one, by group name (`big`), by shard name or by filename, now raises
+  `ModelNotFound` with `reason="sharded"`, the group name, the shard count, the shard paths and
+  the `llama-gguf-split --merge` command, instead of "no model matching that". Previously the only
+  trace was a DEBUG log at discovery, which left an operator looking at a file on disk that the
+  adapter would not explain (D3 finding 6).
 - **A cancelled stream is now proved to leave a usable server behind, not only a correct result.**
   The existing cancellation tests asked what the caller receives; these ask what the supervised
   process, the claim on it and the state directory look like afterwards. Twenty `load`/`unload`

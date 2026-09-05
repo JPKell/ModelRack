@@ -454,6 +454,62 @@ class TestDiscovery:
         assert all(d.identity.identity_confidence is IdentityConfidence.DIGEST for d in descriptors)
         assert all(d.weight_format == "gguf" for d in descriptors)
 
+    @pytest.mark.parametrize(
+        "reference",
+        ["big", "big-00001-of-00002", "big-00001-of-00002.gguf"],
+        ids=["group", "shard", "filename"],
+    )
+    def test_a_split_gguf_is_refused_by_name_not_reported_absent(
+        self, provider: LlamaCppProvider, models: Path, reference: str
+    ) -> None:
+        """D3 finding 6: a model an operator can see on disk gets an explanation, not a silence.
+
+        A split base is still not served — its identity would be a hash over several files while
+        llama-server is handed only the first — but the refusal names the group, counts the
+        shards, lists them and says what to do instead.
+        """
+        with pytest.raises(ModelNotFound) as raised:
+            provider.resolve(reference)
+
+        details = raised.value.details
+        assert details["reason"] == "sharded"
+        assert details["model_name"] == "big"
+        assert details["shard_count"] == 2
+        assert details["shards"] == [
+            str(models / "big-00001-of-00002.gguf"),
+            str(models / "big-00002-of-00002.gguf"),
+        ]
+        assert "llama-gguf-split --merge" in str(raised.value)
+
+    def test_a_split_gguf_is_refused_the_same_way_through_an_identity(
+        self, provider: LlamaCppProvider
+    ) -> None:
+        """`resolve` is not the only door: `inspect_model` and `generate` locate by exact name."""
+        with pytest.raises(ModelNotFound) as raised:
+            provider.inspect_model(_identity("big"))
+        assert raised.value.details["reason"] == "sharded"
+
+        with pytest.raises(ModelNotFound) as generating:
+            provider.generate(_request(identity=_identity("big")))
+        assert generating.value.details["reason"] == "sharded"
+
+    def test_a_name_that_is_simply_absent_is_still_simply_absent(
+        self, provider: LlamaCppProvider
+    ) -> None:
+        """The refusal is for a file that exists; nothing else grows a reason it has not got."""
+        with pytest.raises(ModelNotFound) as raised:
+            provider.resolve("not-a-model-at-all")
+
+        assert "reason" not in raised.value.details
+        assert raised.value.details["known_model_count"] == 2
+
+    def test_shards_are_still_left_out_of_the_listing(self, provider: LlamaCppProvider) -> None:
+        """Refusing by name does not make a split model servable, or listable."""
+        assert [d.identity.provider_model_name for d in provider.list_models()] == [
+            _SECOND_MODEL,
+            _MODEL,
+        ]
+
     def test_the_descriptor_carries_the_header(
         self, provider: LlamaCppProvider, models: Path, frozen_clock: Callable[[], datetime]
     ) -> None:
