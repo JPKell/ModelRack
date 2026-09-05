@@ -1242,3 +1242,44 @@ class TestLlamaCppProviderConformance(ProviderConformanceSuite):
             provider_for=provider_for,
             cache_detail=CacheDetailShape(prompt_tokens=21, cached_tokens=8),
         )
+
+
+class TestEveryAdapterIsBound:
+    """The claim the suite above only makes if it is actually run against every adapter.
+
+    Spec §11.5 says *every adapter passes the same conformance suite*. Nothing enforced the
+    *every*: a binding class deleted, renamed or accidentally left out of a merge would shrink the
+    suite silently — the summary line would still be green, with one adapter no longer in it. This
+    is the one test in this file that is about the file rather than about a provider.
+    """
+
+    def test_all_four_adapters_have_a_binding(self) -> None:
+        bound = {
+            subclass.__mro__[0]
+            for subclass in ProviderConformanceSuite.__subclasses__()
+            if subclass.__name__.startswith("Test")
+        }
+        names = {subclass.__name__ for subclass in bound}
+
+        assert {
+            "TestFakeProviderConformance",
+            "TestFakeProviderMinimalConformance",
+            "TestFakeProviderChunkedConformance",
+            "TestOllamaProviderConformance",
+            "TestOpenAICompatibleProviderConformance",
+            "TestLlamaCppProviderConformance",
+        } <= names
+
+    def test_the_fake_is_bound_in_three_configurations(self) -> None:
+        """Half of what the suite checks is the refusal path, which only a weak provider reaches.
+
+        One capable fake would make every capability-gated behaviour take its declared branch, and
+        the ``CapabilityUnsupported`` half — what every application must handle — would never run.
+        """
+        fakes = [
+            subclass
+            for subclass in ProviderConformanceSuite.__subclasses__()
+            if "Fake" in subclass.__name__
+        ]
+
+        assert len(fakes) == 3
