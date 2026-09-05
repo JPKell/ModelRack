@@ -393,6 +393,16 @@ rather than degrading.
 Coverage floor: **95 %**. The default suite must pass with no Ollama running and no
 `llama-server` installed.
 
+**The tested `llama-server` build** (ADR-0062's consequence — a supervised process is part of the
+tested surface, so which build it was is part of the record). The live journey and the adapter
+work were run against llama.cpp at tag **`b10792`**, commit **`c5a5535`**, built with CUDA. Pin
+the *tag and commit*, not what the binary prints: a tree built without the git stamp reports
+`version: 0.3.0-dev (build 1, commit c5a5535)`, so `--version` alone identifies the commit but
+not the release, and `git -C <tree> describe --tags` is what names the build. This adapter reads
+the build string the running server reports from `/props` and records it on every result as
+`provider_version`, whatever it says — a recorded run names the server that answered rather than
+the one the documentation expected.
+
 ## 19. Compatibility and versioning
 
 * Semantic versioning; pre-1.0 `0.x`.
