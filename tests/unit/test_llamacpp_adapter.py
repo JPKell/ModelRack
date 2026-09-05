@@ -1719,6 +1719,20 @@ class TestStreaming:
         assert terminal.partial_text == "A KV cache"
         assert len(_text_deltas(events)) == 2
 
+    def test_asking_for_reasoning_is_refused_naming_the_flag(
+        self, provider: LlamaCppProvider, launcher: FakeLauncher, server: _FakeServer
+    ) -> None:
+        """`thinking_control` is `False` here: the server reports reasoning, it cannot be asked
+        for. Refused before a server is spawned, because the request is malformed either way.
+        """
+        server()
+
+        with pytest.raises(CapabilityUnsupported) as raised:
+            provider.generate(_request(sampling=SamplingParameters(think=False)))
+
+        assert raised.value.details["capability"] == "thinking_control"
+        assert launcher.specs == []
+
     def test_a_token_already_cancelled_spawns_nothing_and_opens_nothing(
         self, provider: LlamaCppProvider, launcher: FakeLauncher, server: _FakeServer
     ) -> None:

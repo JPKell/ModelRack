@@ -1064,11 +1064,18 @@ class OpenAICompatibleProvider:
         :meth:`modelrack.providers.ollama.OllamaProvider._build_request`, there is therefore no
         endpoint-specific restriction to enforce here: tools and a completion-style prompt are not
         in tension the way they are for Ollama's ``/api/generate``.
+
+        Raises:
+            CapabilityUnsupported: If the request names an adapter, sets a context size, or sets
+                ``sampling.think`` — this protocol has no reasoning-control field, so asking is
+                refused rather than dropped.
         """
         if request.adapter is not None:
             refuse_capability("adapter_hot_swap", action="run a request under a LoRA adapter")
         if request.runtime_profile.context_size is not None:
             refuse_capability("context_configurable", action="serve a caller-chosen context")
+        if request.sampling.think is not None:
+            refuse_capability("thinking_control", action="ask for or suppress reasoning")
         messages = request.messages or (Message(role=Role.USER, content=request.prompt or ""),)
         body: dict[str, Any] = {
             "model": request.identity.provider_model_name,

@@ -586,6 +586,19 @@ class TestGeneration:
         assert route.call_count == 0
 
     @respx.mock
+    def test_asking_for_reasoning_is_refused_before_any_request_is_sent(self) -> None:
+        """The chat completions shape has no reasoning-control field, so `thinking_control` is
+        `False` and asking is refused rather than dropped on the way to the wire.
+        """
+        route = respx.post(f"{_BASE_URL}/v1/chat/completions")
+
+        with pytest.raises(CapabilityUnsupported) as raised:
+            _provider().generate(_request(sampling=SamplingParameters(think=True)))
+
+        assert raised.value.details["capability"] == "thinking_control"
+        assert route.call_count == 0
+
+    @respx.mock
     def test_caller_metadata_never_reaches_the_request_body(
         self, load_openai_compatible_fixture: Callable[[str], Any]
     ) -> None:

@@ -360,6 +360,15 @@ class SamplingParameters:
             :attr:`FinishReason.LENGTH`.
         stop: Sequences that end generation when produced.
         repeat_penalty: Penalty applied to already-seen tokens.
+        think: Whether the model should produce reasoning before its answer. Three states, and
+            the third is the compatible one: ``None`` asks for nothing and produces a request
+            byte-identical to one built before this field existed; ``True`` asks for reasoning;
+            ``False`` asks for it to be suppressed. Only a provider declaring
+            ``thinking_control`` can carry it — every other adapter raises
+            :class:`~modelrack.errors.CapabilityUnsupported` naming the flag, rather than
+            accepting the setting and ignoring it (ADR-0007 rule 2). It is a *sampling* parameter
+            and not a runtime-profile field because it changes per request and does not change how
+            the model is loaded.
     """
 
     temperature: float | None = None
@@ -369,6 +378,7 @@ class SamplingParameters:
     max_output_tokens: int | None = None
     stop: tuple[str, ...] = ()
     repeat_penalty: float | None = None
+    think: bool | None = None
 
     def __post_init__(self) -> None:
         """Validate every supplied parameter against its defensible range.

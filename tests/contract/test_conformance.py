@@ -62,6 +62,7 @@ from modelrack import (
     ResponseFormat,
     ResponseFormatKind,
     Role,
+    SamplingParameters,
     StreamCompleted,
     StreamFailed,
     ThinkingDelta,
@@ -763,6 +764,31 @@ class ProviderConformanceSuite:
             with pytest.raises(CapabilityUnsupported) as raised:
                 provider.generate(request)
             assert raised.value.details["capability"] == "adapter_hot_swap"
+
+    def test_thinking_control_is_honoured_or_refused(
+        self, provider: Provider, identity: ModelIdentity, capabilities: ProviderCapabilities
+    ) -> None:
+        """`thinking_control` is load-bearing from the request side too, as of Phase 8.
+
+        The flag was declared by two adapters and askable by none: `SamplingParameters` had no
+        field for it, which is ADR-0007 rule 2 seen from the other end — a capability nothing can
+        request is a claim no caller can act on. A provider that declares it accepts the request;
+        one that does not refuses, naming the flag, rather than dropping the setting.
+        """
+        request = self.request(identity, sampling=SamplingParameters(think=False))
+
+        if capabilities.thinking_control:
+            assert provider.generate(request).text is not None
+        else:
+            with pytest.raises(CapabilityUnsupported) as raised:
+                provider.generate(request)
+            assert raised.value.details["capability"] == "thinking_control"
+
+    def test_a_request_that_does_not_ask_for_thinking_control_is_served_by_everyone(
+        self, provider: Provider, identity: ModelIdentity
+    ) -> None:
+        """The compatibility half: an unset `think` is not a request for anything."""
+        assert provider.generate(self.request(identity)).text is not None
 
     def test_the_adapter_registry_is_answered_or_refused(
         self, provider: Provider, capabilities: ProviderCapabilities

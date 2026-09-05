@@ -1394,6 +1394,12 @@ class OllamaProvider:
         dishonesty ADR-0007 rule 2 forbids for
         an undeclared capability, just discovered at the *combination* rather than the adapter
         level.
+
+        ``sampling.think`` becomes Ollama's **top-level** ``think`` key. This is the reachable
+        half of ``thinking_control``, which this adapter has declared since Phase 3 and nothing
+        could ask for until Phase 8: a declared capability with no way to request it is ADR-0007
+        rule 2 from the request side. Unset sends no key at all, so a request that does not ask
+        for it is byte-identical to one built before the field existed.
         """
         body: dict[str, Any] = {"model": request.identity.provider_model_name, "stream": stream}
         if request.runtime_profile.keep_alive is not None:
@@ -1419,6 +1425,11 @@ class OllamaProvider:
                 body["format"] = "json"
             elif request.response_format.kind is ResponseFormatKind.JSON_SCHEMA:
                 body["format"] = dict(request.response_format.schema or {})
+        if request.sampling.think is not None:
+            # Ollama's own key, and it is **top-level**: `think` is not one of the model options
+            # (`options` carries sampler settings), so merging it there would be silently ignored
+            # by the runtime and would look like a request that asked for nothing.
+            body["think"] = request.sampling.think
         if request.adapter is not None:
             refuse_capability("adapter_hot_swap", action="run a request under a LoRA adapter")
         if request.prompt is not None:

@@ -97,6 +97,7 @@ from modelrack.provider import (
     ProviderHealth,
     ProviderStatus,
     ResidentModel,
+    require_capability,
 )
 from modelrack.providers._gguf import (
     ArtifactStamp,
@@ -1781,6 +1782,9 @@ class LlamaCppProvider:
             CapabilityUnsupported: If ``prompt`` is combined with ``tools`` — the native endpoint
                 has no concept of tools, and dropping them silently is what ADR-0007 rule 2
                 forbids.
+            CapabilityUnsupported: If ``sampling.think`` is set — this server *reports* reasoning
+                where a model emits it, but has no request-side control over whether it does, so
+                the flag is declared ``False`` and asking is refused rather than dropped.
             ProviderRejected: If ``provider_options`` carries the adapter selection itself
                 (``lora``), a slot pin, or a ``--lora`` launch flag. Each would change what the
                 weights do, or which cache answers, without changing the subject this adapter
@@ -1788,6 +1792,10 @@ class LlamaCppProvider:
                 channel is :attr:`~modelrack.types.GenerationRequest.adapter`.
         """
         self._refuse_smuggled_options(request)
+        if request.sampling.think is not None:
+            require_capability(
+                _CAPABILITIES, "thinking_control", action="ask for or suppress reasoning"
+            )
         if request.prompt is not None:
             if request.tools:
                 raise CapabilityUnsupported(

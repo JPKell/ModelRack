@@ -111,7 +111,8 @@ class GenerationRequest:
     adapter: str | None = None               # a registered adapter's name; one, never two
     runtime_profile: RuntimeProfile = RuntimeProfile()
     sampling: SamplingParameters = SamplingParameters()   # temperature, top_p, top_k, seed,
-                                                          # max_output_tokens, stop, repeat_penalty
+                                                          # max_output_tokens, stop,
+                                                          # repeat_penalty, think
     tools: Sequence[ToolDefinition] = ()
     response_format: ResponseFormat | None = None         # TEXT | JSON | JSON_SCHEMA(schema)
     timeout_seconds: float | None = None
@@ -273,7 +274,15 @@ downcasting to a concrete adapter; an adapter that caches nothing accepts it and
    mismatch is a recorded refusal, never an attempt (ADR-0058 rule 5). An adapter registered after
    its base's server started reports `pending_restart` and folds in at the next moment nothing is
    in flight against that server — **never mid-work** (ADR-0062 decision 3).
-15. **A runtime profile that misdescribes the server is refused, not served.**
+15. **A declared capability is reachable from the request.** `thinking_control` was declared by
+   two adapters and askable by none until `SamplingParameters.think` existed — a capability
+   nothing can request is ADR-0007 rule 2 from the request side, and it left the only lever over
+   an empty reasoning-heavy answer unreachable. `think` is tri-state: `None` asks for nothing and
+   produces a request byte-identical to one built before the field existed, and every adapter
+   declaring `thinking_control = False` raises `CapabilityUnsupported` rather than dropping the
+   setting. Ollama sends it as its own **top-level** `think` key, not inside `options`, where the
+   runtime would ignore it.
+16. **A runtime profile that misdescribes the server is refused, not served.**
    `RuntimeProfile.adapters_registered` is contract 10's discipline one level up: `True` against a
    server launched with no registrations, and `False` against one launched with them, both raise
    `ProfileMismatch`. The comparison is against the **launch**, not against what is registered on
@@ -309,6 +318,7 @@ this package never reads it (ADR-0061 rule 3).
 | A reference names a **split GGUF** (`…-00001-of-00003.gguf`) | `ModelNotFound` | `reason = "sharded"`, with `model_name` (the group), `shard_count` and `shards`, and what to do instead. Split bases are not served — identity would be a hash over several files while llama-server is handed only the first — but they are on disk under the name that was asked for, so the refusal names them rather than reporting them absent (D3 finding 6) |
 | Provider reports a context overflow | `ContextLimitExceeded` | Includes requested and maximum where known |
 | Tools/schema requested but unsupported | `CapabilityUnsupported` | Names the capability |
+| `sampling.think` set against a provider declaring `thinking_control = False` | `CapabilityUnsupported` | Names `thinking_control`. Refused before anything is sent or spawned; `None` asks for nothing and is served by every adapter |
 | An adapter named against a provider declaring `adapter_hot_swap = False` | `CapabilityUnsupported` | Names `adapter_hot_swap`. Never a bare-base generation under the caller's adapter subject |
 | An adapter named that was never registered | `AdapterNotFound` | `details` carries `adapter`, `registered` and `reason = "unknown"` |
 | An adapter refused for the base being served | `AdapterNotFound` | `reason = "incompatible_base"`, with `declared_base_digest` and `served_base_digest` |

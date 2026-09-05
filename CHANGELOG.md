@@ -8,6 +8,26 @@ packaging and release standards §3.
 ## [Unreleased]
 
 ### Added
+- **`SamplingParameters.think`, so a declared capability is finally reachable.**
+  `thinking_control` has been declared by two adapters since Phase 3 and could be requested by
+  nobody: there was no field for it, and `runtime_profile.provider_options` merges into Ollama's
+  `options`, where `think` does not live. A capability nothing can ask for is ADR-0007 rule 2 seen
+  from the request side.
+
+  Tri-state, like every other addition in this release: `None` asks for nothing and produces a
+  request **byte-identical** to one built before the field existed (pinned by a golden on both
+  Ollama endpoints); `True` asks for reasoning; `False` asks for it to be suppressed. The Ollama
+  adapter sends it as the runtime's own **top-level** `think` key — inside `options` it would be
+  silently ignored, which would look exactly like a request that asked for nothing. Every adapter
+  declaring `thinking_control = False` — llama.cpp, the OpenAI-compatible adapter, and the fake
+  outside its full configuration — raises `CapabilityUnsupported` naming the flag, before
+  anything is sent or spawned. `FakeProvider` honours it where declared, so the capability's
+  positive path has a test that needs no live runtime, and the conformance suite gained the row
+  for all six bindings.
+
+  Measured context (`G2_HANDOFF.md` §4–§5): `tools.plan` on gpt-oss:20b returned an empty document
+  1 run in 6 at `max_output_tokens = 4096` and 3 in 6 at 8192, every empty answer
+  `done_reason=length` with `eval_count` equal to the budget. The output budget is not the lever.
 - **A split GGUF is refused by name rather than reported absent.** A sharded base
   (`big-00001-of-00002.gguf`) is still not served — its identity would be a hash over several
   files while llama-server is handed only the first — and still does not appear in `list_models()`.

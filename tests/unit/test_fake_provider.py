@@ -592,6 +592,40 @@ class TestThinking:
         assert result.text == "answer"
         assert result.thinking == "working"
 
+    def test_asking_for_no_reasoning_suppresses_it(self) -> None:
+        """The request-side half of the flag: a caller can now ask, and the fake honours it.
+
+        The fake is where a consumer meets both halves of every capability, so it is where
+        `think` has a positive path that needs no live runtime.
+        """
+        script = FakeScript(generations=(FakeGeneration(text="answer", thinking="working"),))
+
+        result = _provider(script).generate(
+            _request(_identity(), sampling=SamplingParameters(think=False))
+        )
+
+        assert result.text == "answer"
+        assert not is_supported(result.thinking)
+
+    def test_asking_for_reasoning_leaves_it_as_scripted(self) -> None:
+        script = FakeScript(generations=(FakeGeneration(text="answer", thinking="working"),))
+
+        result = _provider(script).generate(
+            _request(_identity(), sampling=SamplingParameters(think=True))
+        )
+
+        assert result.thinking == "working"
+
+    def test_asking_a_provider_that_declares_none_is_refused(self) -> None:
+        script = FakeScript(capabilities=MINIMAL_CAPABILITIES)
+
+        with pytest.raises(CapabilityUnsupported) as raised:
+            _provider(script).generate(
+                _request(_identity(), sampling=SamplingParameters(think=True))
+            )
+
+        assert raised.value.details["capability"] == "thinking_control"
+
     def test_reasoning_cannot_be_scripted_onto_a_provider_that_declares_none(self) -> None:
         with pytest.raises(ValidationError) as raised:
             FakeScript(

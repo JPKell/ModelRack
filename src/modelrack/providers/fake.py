@@ -954,6 +954,8 @@ class FakeProvider:
                 self._require_capability("structured_output", "enforce a JSON Schema")
         if request.runtime_profile.context_size is not None:
             self._require_capability("context_configurable", "serve a caller-chosen context")
+        if request.sampling.think is not None:
+            self._require_capability("thinking_control", "ask for or suppress reasoning")
 
     def _build_plan(
         self,
@@ -977,9 +979,15 @@ class FakeProvider:
             )
         )
         text, chunks, truncated = _planned_text(request, generation, seed_material)
+        # `think=False` suppresses the scripted reasoning; `think=True` and unset both leave it
+        # as scripted. A provider that accepted the request and reasoned anyway would be the
+        # ignored-setting dishonesty the flag exists to prevent, and it is the fake that every
+        # consumer meets both halves of this capability on.
         thinking: str | Unsupported = (
             generation.thinking
-            if capabilities.thinking_control and generation.thinking is not None
+            if capabilities.thinking_control
+            and generation.thinking is not None
+            and request.sampling.think is not False
             else UNSUPPORTED
         )
         tool_calls, argument_texts = _planned_tool_calls(generation, generation_index)

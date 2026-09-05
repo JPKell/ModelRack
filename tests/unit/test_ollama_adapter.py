@@ -936,6 +936,89 @@ class TestGeneration:
         assert "keep_alive" not in body.get("options", {})
 
     @respx.mock
+    def test_thinking_control_is_sent_at_the_top_level_not_inside_options(self) -> None:
+        """The reachable half of a flag this adapter has declared since Phase 3.
+
+        `think` is not one of Ollama's model options — `options` carries sampler settings — so a
+        value merged there would be ignored by the runtime and the request would look like one
+        that asked for nothing. G2 measured what the gap cost: `tools.plan` on gpt-oss:20b
+        returned an empty document 1/6 at 4096 output tokens and 3/6 at 8192, every empty answer
+        `done_reason=length` with `eval_count` equal to the budget. The output budget was not the
+        lever.
+        """
+        route = respx.post(f"{_BASE_URL}/api/chat").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": _MODEL,
+                    "message": {"role": "assistant", "content": "x"},
+                    "done": True,
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+        _provider().generate(_request(sampling=SamplingParameters(think=False)))
+
+        body = json.loads(route.calls.last.request.content)
+        assert body["think"] is False
+        assert "think" not in body.get("options", {})
+
+    @respx.mock
+    def test_asking_for_reasoning_sends_true(self) -> None:
+        route = respx.post(f"{_BASE_URL}/api/chat").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": _MODEL,
+                    "message": {"role": "assistant", "content": "x"},
+                    "done": True,
+                    "done_reason": "stop",
+                },
+            )
+        )
+
+        _provider().generate(_request(sampling=SamplingParameters(think=True)))
+
+        assert json.loads(route.calls.last.request.content)["think"] is True
+
+    @respx.mock
+    def test_a_request_that_does_not_ask_is_byte_identical_to_one_built_before_the_field(
+        self,
+    ) -> None:
+        """The additive claim, pinned: an unset `think` sends no key, on both endpoints."""
+        chat = respx.post(f"{_BASE_URL}/api/chat").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "model": _MODEL,
+                    "message": {"role": "assistant", "content": "x"},
+                    "done": True,
+                    "done_reason": "stop",
+                },
+            )
+        )
+        completion = respx.post(f"{_BASE_URL}/api/generate").mock(
+            return_value=httpx.Response(
+                200, json={"model": _MODEL, "response": "x", "done": True, "done_reason": "stop"}
+            )
+        )
+
+        _provider().generate(_request())
+        _provider().generate(GenerationRequest(identity=_identity(), prompt="Explain KV caching."))
+
+        assert json.loads(chat.calls.last.request.content) == {
+            "model": _MODEL,
+            "stream": False,
+            "messages": [{"role": "user", "content": "Explain KV caching."}],
+        }
+        assert json.loads(completion.calls.last.request.content) == {
+            "model": _MODEL,
+            "stream": False,
+            "prompt": "Explain KV caching.",
+        }
+
+    @respx.mock
     def test_caller_metadata_never_reaches_the_request_body(self) -> None:
         route = respx.post(f"{_BASE_URL}/api/chat").mock(
             return_value=httpx.Response(
