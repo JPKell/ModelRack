@@ -7,6 +7,15 @@ packaging and release standards §3.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-05
+
+Phases 6, 7 and 8 together: a supervised `llama-server` provider, LoRA adapters registered at
+launch and selected per request with the cache-correctness discipline I17 demands, and Phase 8's
+cancellation, leak and profile-honesty work — including ADR-0074's `adapters_registered` refusal,
+the sharded-GGUF refusal by name, the request-side thinking control, and the LA1 exit demonstrated
+live on the reference machine: one base, three adapters, twenty alternating generations, one
+load, flat memory. The `baseaicore` floor is `>=0.4.2`.
+
 ### Added
 - **A server launched with adapters registered disables CUDA graphs by default.** The LA1 exit's
   live run found the tested `llama-server` (b10792, CUDA) leaking ~14 MiB of host memory per

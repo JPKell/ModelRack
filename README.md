@@ -2,19 +2,20 @@
 
 The suite's only model client: a provider-neutral abstraction over local inference runtimes (Ollama first), with a deterministic FakeProvider.
 
-**Status:** `0.6.0` — **Phases 1–5 complete; the package is feature-complete against its
+**Status:** `0.7.0` — **Phases 1–8 complete; the package is feature-complete against its
 [specification](docs/packages/modelrack/spec.md).** The provider-neutral vocabulary, the
 streamed-event union and the `Provider` protocol exist and type-check; a deterministic, scriptable
-`FakeProvider` ships in `modelrack.testing`; two real adapters — `OllamaProvider` and
-`OpenAICompatibleProvider` — talk to a real Ollama server and an OpenAI-compatible one (llama.cpp
-server, LM Studio, …) over HTTP, both proven against the same conformance suite the fake proves
-itself against; and Phase 5 adds the operational surface LoadCoach depends on — residency with
-capability gating, hardened cancellation, an explicit metadata cache, and an optional `on_event`
-observability hook. See the [development plan](docs/packages/modelrack/development-plan.md) for
-what each phase adds, and the [quickstart](docs/quickstart.md) to run something in five minutes.
-**Unreleased, riding the next minor:** Phase 6 adds a third real adapter, `LlamaCppProvider`,
-which spawns and supervises `llama-server` itself and serves GGUF files with digest-bound
-identities — the start of the adapter arc (ADR-0062); see the changelog.
+`FakeProvider` ships in `modelrack.testing`; three real adapters — `OllamaProvider`,
+`OpenAICompatibleProvider` and `LlamaCppProvider` — are proven against the same conformance suite
+the fake proves itself against. `LlamaCppProvider` spawns and supervises `llama-server` itself,
+serves GGUF files under digest-bound identities, and registers LoRA adapters at launch for
+per-request selection with the cache-correctness discipline the adapter arc demands (ADR-0062,
+ADR-0063, ADR-0074): the LA1 exit — one base, three adapters, twenty alternating generations, one
+load, flat memory — was demonstrated live on the reference machine. Residency with capability
+gating, hardened cancellation, an explicit metadata cache and an optional `on_event` observability
+hook are the operational surface LoadCoach depends on. See the
+[development plan](docs/packages/modelrack/development-plan.md) for what each phase adds, and the
+[quickstart](docs/quickstart.md) to run something in five minutes.
 
 Part of the **Local AI Suite**.
 
