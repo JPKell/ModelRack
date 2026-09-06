@@ -172,6 +172,18 @@ load, flat memory. The `baseaicore` floor is `>=0.4.2`.
 - `docs/providers.md` gains the `LlamaCppProvider` column.
 
 ### Fixed
+- **A descriptor states `head_dim` even when the file does not.** `attention.key_length` is
+  optional in GGUF and most files omit it — Qwen2.5 and Qwen3 do — and llama.cpp itself defaults
+  it to `embedding_length / head_count`. Reporting `UNSUPPORTED` therefore described the *file*
+  accurately while misdescribing the model the server would load. `layers`, `kv_heads` and
+  `head_dim` together are the only route to a theoretical KV-cache figure, and a consumer that
+  cannot compute one cannot estimate VRAM at all: LoadCoach treats an unknown estimate as a
+  refusal rather than as a zero (ADR-0016), so **every GGUF-served candidate was ineligible on any
+  machine with GPU telemetry** — the only provider kind that can serve an adapter could serve
+  nothing at all through a running router. The field is now reconstructed from its factors in both
+  the llama.cpp and the Ollama descriptor, which read the same GGUF key names; an inexact division
+  stays `UNSUPPORTED` rather than becoming a rounded guess. Found by IdeaPress's LA2 journey, the
+  first thing to route llama.cpp through a served LoadCoach rather than an in-process one.
 - `OpenAICompatibleProvider` now sends `repeat_penalty` beside `repetition_penalty`. llama-server
   reads only the former and vLLM only the latter, and each ignores the other, so a caller's
   `SamplingParameters.repeat_penalty` was silently dropped by a llama-server reached through this

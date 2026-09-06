@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from baseaicore import ValidationError
+from baseaicore import UNSUPPORTED, Measurement, ValidationError, is_supported
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -54,6 +54,7 @@ __all__ = [
     "ArtifactStamp",
     "GgufFormatError",
     "GgufHeader",
+    "head_dim_of",
     "read_gguf_header",
     "sha256_of_file",
 ]
@@ -378,3 +379,42 @@ def sha256_of_file(path: Path) -> str:
     with path.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256")
     return f"sha256:{digest.hexdigest()}"
+
+
+def head_dim_of(
+    *, head_dim: Measurement, embedding_dim: Measurement, attention_heads: Measurement
+) -> Measurement:
+    """Return the per-head attention dimension, deriving it when the file does not state one.
+
+    Args:
+        head_dim: ``<arch>.attention.key_length``, as read.
+        embedding_dim: ``<arch>.embedding_length``.
+        attention_heads: ``<arch>.attention.head_count``.
+
+    Returns:
+        ``head_dim`` where the file states it; otherwise ``embedding_dim // attention_heads`` where
+        both are known and divide exactly; otherwise ``UNSUPPORTED``.
+
+    ``attention.key_length`` is **optional** in GGUF and most files omit it — Qwen2.5 and Qwen3 do.
+    llama.cpp itself defaults it to ``embedding_length / head_count`` when the key is absent, so
+    reporting ``UNSUPPORTED`` describes the *file* accurately while misdescribing the model the
+    server will actually load, and this reconstruction is llama.cpp's own convention rather than an
+    approximation of it.
+
+    Why it matters enough to derive: ``layers``, ``kv_heads`` and ``head_dim`` together are the
+    only route to a theoretical KV-cache figure, and a consumer that cannot compute one cannot
+    estimate VRAM at all. LoadCoach treats an unknown estimate as a refusal rather than as a zero
+    ([ADR-0016](../../../docs/adr/0016-unavailable-is-not-zero.md)), so a missing ``head_dim`` made
+    **every** GGUF-served candidate ineligible on any machine with GPU telemetry — found by
+    IdeaPress's LA2 journey, the first thing to route llama.cpp through a served LoadCoach.
+
+    An inexact division is ``UNSUPPORTED``, not a rounded number: two fields that do not describe
+    one geometry are a reason to report nothing, never to invent something plausible.
+    """
+    if is_supported(head_dim):
+        return head_dim
+    if not is_supported(embedding_dim) or not is_supported(attention_heads):
+        return UNSUPPORTED
+    if attention_heads <= 0 or embedding_dim % attention_heads:
+        return UNSUPPORTED
+    return embedding_dim // attention_heads

@@ -313,3 +313,67 @@ class TestHashing:
         gguf_writer(tmp_path / "a.gguf", metadata={"k": 1}, payload=b"\x01\x02")
 
         assert ArtifactStamp.of(path) != before
+
+
+# ------------------------------------------------------------------ head_dim
+
+
+class TestHeadDim:
+    """`attention.key_length` is optional in GGUF, and a missing one is not a missing model.
+
+    Most files omit it — Qwen2.5 and Qwen3 do — and llama.cpp itself defaults it to
+    `embedding_length / head_count`. Reporting `UNSUPPORTED` therefore describes the *file*
+    accurately while misdescribing the model the server will load, and a consumer that cannot
+    compute a theoretical KV figure cannot estimate VRAM at all: LoadCoach treats an unknown
+    estimate as a refusal rather than as a zero (ADR-0016), so every GGUF-served candidate was
+    ineligible on any machine with GPU telemetry until this derivation existed.
+    """
+
+    def test_a_stated_key_length_is_used_as_stated(self) -> None:
+        from baseaicore import UNSUPPORTED
+
+        from modelrack.providers._gguf import head_dim_of
+
+        assert head_dim_of(head_dim=64, embedding_dim=1536, attention_heads=12) == 64, (
+            "a file that states the field is believed over any reconstruction"
+        )
+        assert (
+            head_dim_of(head_dim=64, embedding_dim=UNSUPPORTED, attention_heads=UNSUPPORTED) == 64
+        )
+
+    def test_a_missing_key_length_is_reconstructed_from_its_factors(self) -> None:
+        from baseaicore import UNSUPPORTED
+
+        from modelrack.providers._gguf import head_dim_of
+
+        # Qwen2.5-1.5B-Instruct, whose GGUF states head_count and embedding_length and no
+        # key_length at all.
+        assert head_dim_of(head_dim=UNSUPPORTED, embedding_dim=1536, attention_heads=12) == 128
+
+    @pytest.mark.parametrize(
+        ("embedding_dim", "attention_heads"),
+        [
+            ("unsupported", 12),
+            (1536, "unsupported"),
+            ("unsupported", "unsupported"),
+            (1536, 0),
+            # Not a whole number of dimensions per head: two fields that do not describe one
+            # geometry are a reason to report nothing, never to round something into place.
+            (1000, 12),
+        ],
+    )
+    def test_an_unreconstructable_head_dim_is_unsupported_not_a_guess(
+        self, embedding_dim: object, attention_heads: object
+    ) -> None:
+        from baseaicore import UNSUPPORTED, is_supported
+
+        from modelrack.providers._gguf import head_dim_of
+
+        result = head_dim_of(
+            head_dim=UNSUPPORTED,
+            embedding_dim=UNSUPPORTED if embedding_dim == "unsupported" else embedding_dim,  # type: ignore[arg-type]
+            attention_heads=(
+                UNSUPPORTED if attention_heads == "unsupported" else attention_heads  # type: ignore[arg-type]
+            ),
+        )
+        assert not is_supported(result)

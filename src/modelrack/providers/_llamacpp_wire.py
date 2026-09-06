@@ -73,7 +73,7 @@ from baseaicore import (
     normalize_digest,
 )
 
-from modelrack.providers._gguf import ArraySummary
+from modelrack.providers._gguf import ArraySummary, head_dim_of
 from modelrack.providers._openai_wire import (
     message_payload,
     request_tool_definitions,
@@ -406,7 +406,13 @@ def build_descriptor(
         layers=arch("block_count"),
         attention_heads=arch("attention.head_count"),
         kv_heads=arch("attention.head_count_kv"),
-        head_dim=arch("attention.key_length"),
+        # `attention.key_length` is optional in GGUF and most files omit it; llama.cpp's own
+        # default is `embedding_length / head_count`, which is what `head_dim_of` reconstructs.
+        head_dim=head_dim_of(
+            head_dim=arch("attention.key_length"),
+            embedding_dim=arch("embedding_length"),
+            attention_heads=arch("attention.head_count"),
+        ),
         vocab_size=vocab_size,
         rope_config=rope or None,
         sliding_window=arch("attention.sliding_window"),

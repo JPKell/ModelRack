@@ -46,6 +46,7 @@ from baseaicore import (
     normalize_digest,
 )
 
+from modelrack.providers._gguf import head_dim_of
 from modelrack.types import FinishReason, GenerationUsage, Timing, ToolCall
 
 if TYPE_CHECKING:
@@ -216,7 +217,13 @@ def build_descriptor(
         layers=arch("block_count"),
         attention_heads=arch("attention.head_count"),
         kv_heads=arch("attention.head_count_kv"),
-        head_dim=arch("attention.key_length"),
+        # `attention.key_length` is optional in GGUF and most files omit it; llama.cpp's own
+        # default is `embedding_length / head_count`, which is what `head_dim_of` reconstructs.
+        head_dim=head_dim_of(
+            head_dim=arch("attention.key_length"),
+            embedding_dim=arch("embedding_length"),
+            attention_heads=arch("attention.head_count"),
+        ),
         vocab_size=arch("vocab_size"),
         sliding_window=arch("attention.sliding_window"),
         declared_capabilities=_declared_capabilities(show.get("capabilities")),
