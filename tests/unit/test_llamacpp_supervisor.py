@@ -758,6 +758,34 @@ class TestSubprocessLauncherDirectly:
         process.terminate()  # on an exited group: tolerated
         process.kill()
 
+    def test_env_defaults_reach_the_child_unless_the_parent_already_sets_them(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A default fills a gap in the inherited environment and never overrides a decision."""
+        monkeypatch.delenv("MODELRACK_TEST_PROBE", raising=False)
+        spec = LaunchSpec(
+            argv=("sh", "-c", 'echo "probe=$MODELRACK_TEST_PROBE home=$HOME"'),
+            port=1,
+            stderr_path=tmp_path / "default.log",
+            model_name="m",
+            env_defaults=(("MODELRACK_TEST_PROBE", "from-default"),),
+        )
+        assert SubprocessLauncher()(spec).wait(5.0) == 0
+        assert (tmp_path / "default.log").read_text().strip() == (
+            f"probe=from-default home={os.environ['HOME']}"
+        ), "the default was applied and the rest of the environment still inherited"
+
+        monkeypatch.setenv("MODELRACK_TEST_PROBE", "operator")
+        spec = LaunchSpec(
+            argv=("sh", "-c", 'echo "probe=$MODELRACK_TEST_PROBE"'),
+            port=1,
+            stderr_path=tmp_path / "explicit.log",
+            model_name="m",
+            env_defaults=(("MODELRACK_TEST_PROBE", "from-default"),),
+        )
+        assert SubprocessLauncher()(spec).wait(5.0) == 0
+        assert (tmp_path / "explicit.log").read_text().strip() == "probe=operator"
+
     def test_wait_returns_none_while_the_process_runs(self, tmp_path: Path) -> None:
         spec = LaunchSpec(
             argv=("sleep", "5"), port=1, stderr_path=tmp_path / "e.log", model_name="m"

@@ -8,6 +8,14 @@ packaging and release standards §3.
 ## [Unreleased]
 
 ### Added
+- **A server launched with adapters registered disables CUDA graphs by default.** The LA1 exit's
+  live run found the tested `llama-server` (b10792, CUDA) leaking ~14 MiB of host memory per
+  adapter-set change with CUDA graphs on — unbounded, flat on CPU, flat for a fixed adapter,
+  unaffected by `--cache-ram 0` — and flat with `GGML_CUDA_DISABLE_GRAPHS=1` at the same speed.
+  `LaunchSpec.env_defaults` carries environment *defaults* to the launcher: applied where the
+  application's environment does not already set the name, so an operator's explicit setting
+  wins. A launch without adapters carries none and inherits the environment exactly as before.
+  Spec §18 records the evidence and when to drop the default.
 - **The LA1 exit demonstration (I16) as a live test.** `tests/live/test_llamacpp_live.py::TestWarmBase`
   registers three adapters on one base and runs twenty generations alternating them, asserting
   zero base loads from three witnesses — the server pid, the `load` events the observer saw, and

@@ -123,12 +123,19 @@ class LaunchSpec:
         stderr_path: Where the launcher must send the child's stderr (and stdout). A file, not a
             pipe — see the module docstring.
         model_name: The model being served, for diagnostics and pid records.
+        env_defaults: Environment variables the child gets **where this process does not already
+            set them**, as ``(name, value)`` pairs. Defaults, not overrides: an operator who has
+            set one of these names in the environment the application runs in has made a
+            decision, and the launcher passes it through untouched. Empty means the child
+            inherits this process's environment exactly, which is what every launch did before
+            the field existed.
     """
 
     argv: tuple[str, ...]
     port: int
     stderr_path: Path
     model_name: str
+    env_defaults: tuple[tuple[str, str], ...] = ()
 
 
 class ServerProcess(Protocol):
@@ -257,6 +264,9 @@ class SubprocessLauncher:
                 opened. Not translated here — the supervisor turns it into a typed error with
                 the attempted argv attached.
         """
+        # The parent's environment wins over the defaults: `{**defaults, **environ}`. `None`
+        # keeps the exact pre-field behaviour (inherit) when there is nothing to fill in.
+        env = {**dict(spec.env_defaults), **os.environ} if spec.env_defaults else None
         with spec.stderr_path.open("wb") as stderr:
             popen = subprocess.Popen(  # noqa: S603 — argv is built by this package, not from input
                 spec.argv,
@@ -264,6 +274,7 @@ class SubprocessLauncher:
                 stdout=stderr,
                 stderr=stderr,
                 start_new_session=True,
+                env=env,
             )
         return _PopenProcess(popen)
 
@@ -614,6 +625,7 @@ class LlamaServerSupervisor:
         build_argv: Callable[[int], tuple[str, ...]],
         probe: Callable[[int], bool],
         launch_key: str = "",
+        env_defaults: tuple[tuple[str, str], ...] = (),
     ) -> ServerHandle:
         """Start a server for ``model_name`` and wait until it answers a healthy probe.
 
@@ -628,6 +640,7 @@ class LlamaServerSupervisor:
             probe: Answers whether the server on a port is healthy. Provided by the adapter,
                 which owns the HTTP client; must not raise.
             launch_key: Recorded on the handle unchanged; see :attr:`ServerHandle.launch_key`.
+            env_defaults: Passed to the launcher on the spec; see :attr:`LaunchSpec.env_defaults`.
 
         Returns:
             The handle, with ``startup_ms`` set from this process's own clock.
@@ -657,7 +670,13 @@ class LlamaServerSupervisor:
             argv = build_argv(port)
             stderr_path = self._state_dir / f"llama-server-{port}{_STDERR_FILE_SUFFIX}"
             pid_path = self._state_dir / f"llama-server-{port}{_PID_FILE_SUFFIX}"
-            spec = LaunchSpec(argv=argv, port=port, stderr_path=stderr_path, model_name=model_name)
+            spec = LaunchSpec(
+                argv=argv,
+                port=port,
+                stderr_path=stderr_path,
+                model_name=model_name,
+                env_defaults=env_defaults,
+            )
             start_ns = self._monotonic()
             started_at = self._clock()
             try:

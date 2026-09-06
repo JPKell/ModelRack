@@ -847,6 +847,33 @@ class TestPendingRestartAndTheInFlightGuard:
         assert len(states) == 1
         assert states[0].adapter.artifact_sha256 == _digest_of(adapter_files["house-voice"])
 
+    def test_a_launch_with_adapters_disables_cuda_graphs_unless_the_operator_decided(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        registration: Callable[..., AdapterRegistration],
+        launcher: FakeLauncher,
+    ) -> None:
+        """The flat-memory half of the LA1 exit, made the default rather than a runbook step.
+
+        llama-server's CUDA build leaks host memory on every adapter-set change while CUDA
+        graphs are on (spec §18). A launch that registers adapters therefore carries the
+        variable as an environment *default*; a launch without adapters carries nothing, so its
+        environment — like its argv — is exactly what Phase 6 launched with.
+        """
+        provider = make_provider(adapters=[registration()])
+        try:
+            provider.generate(_request())
+            assert launcher.specs[-1].env_defaults == (("GGML_CUDA_DISABLE_GRAPHS", "1"),)
+        finally:
+            provider.close()
+
+        bare = make_provider()
+        try:
+            bare.generate(_request())
+            assert not launcher.specs[-1].env_defaults
+        finally:
+            bare.close()
+
     def test_a_name_absent_from_the_new_set_is_retired_at_the_next_idle(
         self,
         make_provider: Callable[..., LlamaCppProvider],

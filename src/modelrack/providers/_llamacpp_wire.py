@@ -518,6 +518,35 @@ def adapter_launch_flags(artifact_paths: Sequence[Path]) -> tuple[str, ...]:
     return tuple(flags)
 
 
+ADAPTER_LAUNCH_ENV_DEFAULTS: Final[tuple[tuple[str, str], ...]] = (
+    ("GGML_CUDA_DISABLE_GRAPHS", "1"),
+)
+"""Environment defaults for a server launched with adapters registered.
+
+With CUDA graphs enabled, ``llama-server`` (b10792, CUDA build) leaks about 14 MiB of host
+memory every time a request changes the active adapter set — the compute graph changes with
+the adapter configuration and each re-capture is kept, without bound: sixty switches cost
+700 MiB on the reference machine, a two-state toggle leaks at the same rate, a fixed adapter is
+flat, a CPU-only server is flat, and ``--cache-ram 0`` changes nothing. With graphs disabled
+the resident set settles after each adapter's first use and stays there, and the twenty
+alternating generations of the LA1 exit ran at the same speed (spec §18). A *default*, so an
+operator who has set this variable already keeps their setting (:class:`LaunchSpec`).
+"""
+
+
+def adapter_launch_env(artifact_paths: Sequence[Path]) -> tuple[tuple[str, str], ...]:
+    """The environment defaults for a launch registering ``artifact_paths``.
+
+    Args:
+        artifact_paths: The adapter artifacts to register.
+
+    Returns:
+        :data:`ADAPTER_LAUNCH_ENV_DEFAULTS` when there is at least one adapter, else ``()`` — a
+        server launched without adapters inherits the environment exactly as Phase 6 did.
+    """
+    return ADAPTER_LAUNCH_ENV_DEFAULTS if artifact_paths else ()
+
+
 def read_lora_adapters(payload: object, *, by_path: Mapping[str, str]) -> tuple[ServerAdapter, ...]:
     """Read ``GET /lora-adapters`` into the ids this adapter will send.
 

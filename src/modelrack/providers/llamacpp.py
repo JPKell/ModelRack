@@ -140,6 +140,7 @@ from modelrack.providers._llamacpp_wire import (
     SLOT_PINNING_KEYS,
     LlamaCppError,
     ServerAdapter,
+    adapter_launch_env,
     build_chat_body,
     build_completion_body,
     build_descriptor,
@@ -1455,6 +1456,7 @@ class LlamaCppProvider:
         # Before the process exists: a profile that misdescribes the server this call is about to
         # launch is refused here, so the refusal costs no spawn.
         self._refuse_misdescribed_profile(entry.name, profile, adapters_registered=bool(registered))
+        adapter_paths = [item.artifact_path for item in registered]
         self._events.started(operation="load", model_name=entry.name, metadata={})
         try:
             handle = self._supervisor.spawn(
@@ -1465,10 +1467,11 @@ class LlamaCppProvider:
                     alias=entry.name,
                     port=port,
                     profile=profile,
-                    adapter_paths=[item.artifact_path for item in registered],
+                    adapter_paths=adapter_paths,
                 ),
                 probe=self._probe,
                 launch_key=self._launch_key(entry, profile),
+                env_defaults=adapter_launch_env(adapter_paths),
             )
         except ProviderError as exc:
             self._events.failed(

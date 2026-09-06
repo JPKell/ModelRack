@@ -406,6 +406,20 @@ the build string the running server reports from `/props` and records it on ever
 `provider_version`, whatever it says — a recorded run names the server that answered rather than
 the one the documentation expected.
 
+**A known defect in that build, and what this package does about it.** The LA1 exit's live run
+(2026-09-05, `TestWarmBase`, three adapters on `Qwen2.5-1.5B-Instruct` Q8_0) found that the CUDA
+build leaks about **14 MiB of host memory per adapter-set change** while CUDA graphs are enabled:
+sixty switches cost 700 MiB and nothing reclaimed it; a two-state toggle leaks at the same rate; a
+fixed adapter is flat; a CPU-only server is flat; `--cache-ram 0` changes nothing. With
+`GGML_CUDA_DISABLE_GRAPHS=1` the resident set settles after each adapter's first use and the twenty
+alternating generations ran at the same speed (median 253 ms against 257 ms). So a server launched
+**with adapters registered** gets that variable as an environment **default** — filled in only where
+the application's own environment does not set it, so an operator's explicit choice always wins —
+and a server launched without adapters inherits the environment untouched, exactly as before
+(`LaunchSpec.env_defaults`, `adapter_launch_env`). Upstream `master` at `b10792-28` carries no
+change to the adapter or CUDA-graph paths; re-check when the pinned build moves, and drop the
+default when the leak is gone.
+
 ## 19. Compatibility and versioning
 
 * Semantic versioning; pre-1.0 `0.x`.
