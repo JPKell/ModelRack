@@ -50,6 +50,8 @@ from modelrack import (
     FinishReason,
     GenerationRequest,
     Message,
+    ProviderEvent,
+    ProviderEventKind,
     ProviderStatus,
     Role,
     SamplingParameters,
@@ -78,6 +80,8 @@ _LIVE_PROMPT = "Name one thing a KV cache stores."
 # an empty `text`. The cap keeps the journey short; the assertions accept reasoning as output.
 _OUTPUT_CAP = SamplingParameters(max_output_tokens=256)
 _CANARY_ADAPTER_COUNT = 2
+_WARM_BASE_ADAPTER_COUNT = 3
+_WARM_BASE_GENERATIONS = 20
 
 
 def _skip_or_fail(reason: str) -> None:
@@ -417,7 +421,10 @@ class TestAdapterCanary:
             else:
                 assert result.adapter is None
 
-        print(f"\ncanary cache_read by subject: {cache_reads}")  # noqa: T201 — the evidence
+        print(  # noqa: T201 — the evidence, for a person to read
+            f"\ncanary cache_read by subject: {cache_reads}\n"
+            + "\n".join(f"  {subject}: {text[:100]!r}" for subject, text in answers.items())
+        )
         assert answers["canary-0"] != answers["canary-1"], (
             "Two adapters produced byte-identical continuations of one prompt at temperature 0. "
             "Either the adapters are behaviourally identical — pick two that differ — or a prefix "
@@ -427,4 +434,152 @@ class TestAdapterCanary:
             "The bare base answered exactly as one of the adapters did, which is what a request "
             "carrying no `lora` field would produce: llama-server restores the launch-time set "
             "and keeps the slot's prefix."
+        )
+
+
+def _rss_bytes(pid: int) -> int:
+    """Read a process's resident set from ``/proc``, in bytes."""
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1]) * 1024
+    raise AssertionError(f"no VmRSS for pid {pid}")
+
+
+@pytest.fixture(scope="module")
+def warm_base_events() -> list[ProviderEvent]:
+    return []
+
+
+@pytest.fixture(scope="module")
+def warm_base_provider(
+    model_directory: Path,
+    adapter_paths: list[Path],
+    warm_base_events: list[ProviderEvent],
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[LlamaCppProvider]:
+    if len(adapter_paths) < _WARM_BASE_ADAPTER_COUNT:
+        _skip_or_fail(
+            f"I16 needs {_WARM_BASE_ADAPTER_COUNT} adapters for one base; "
+            f"MODELRACK_LLAMACPP_ADAPTERS named {len(adapter_paths)}."
+        )
+    if shutil.which(_SERVER) is None and not Path(_SERVER).is_file():
+        _skip_or_fail(f"{_SERVER!r} is not on PATH; I16 needs a real llama-server.")
+    probe = LlamaCppProvider(
+        model_directory, state_dir=tmp_path_factory.mktemp("warm-probe"), server_path=_SERVER
+    )
+    base = probe.resolve(_ADAPTER_BASE or "")
+    probe.close()
+    assert base.artifact_digest is not None
+    registrations = [
+        AdapterRegistration(
+            name=f"warm-{index}",
+            artifact_path=path,
+            artifact_sha256=sha256_of_file(path),
+            base_model_name=base.provider_model_name,
+            base_artifact_digest=base.artifact_digest,
+            data_classification=DataClassification.CONFIDENTIAL,
+        )
+        for index, path in enumerate(adapter_paths[:_WARM_BASE_ADAPTER_COUNT])
+    ]
+    instance = LlamaCppProvider(
+        model_directory,
+        state_dir=tmp_path_factory.mktemp("warm-state"),
+        adapters=registrations,
+        server_path=_SERVER,
+        startup_timeout_seconds=600.0,
+        on_event=warm_base_events.append,
+    )
+    try:
+        yield instance
+    finally:
+        instance.close()
+
+
+class TestWarmBase:
+    """I16, the LA1 exit: one base, three adapters, twenty alternating generations, one load.
+
+    The claim is that switching adapters never reloads the base. It is asserted from three
+    independent witnesses rather than from the absence of a complaint: the **process table** (the
+    server pid that answered the first generation answers the twentieth), the **event stream**
+    (exactly one ``load`` operation started across the whole run), and **timing** (no generation
+    took as long as the one measured base load did, which is what a hidden reload would cost).
+    The server's resident set is read before and after as the flat-memory evidence the injected
+    launcher cannot produce.
+
+    Needs what :class:`TestAdapterCanary` needs, plus a third adapter in
+    ``MODELRACK_LLAMACPP_ADAPTERS``.
+    """
+
+    def test_twenty_alternating_generations_load_the_base_once(
+        self, warm_base_provider: LlamaCppProvider, warm_base_events: list[ProviderEvent]
+    ) -> None:
+        provider = warm_base_provider
+        identity = provider.resolve(_ADAPTER_BASE or "")
+        # The profile states what the server is (ADR-0074) — a `False` here would be refused.
+        profile = RuntimeProfile(adapters_registered=True)
+        loaded = provider.load(identity, profile)
+        assert loaded.already_resident is False
+        assert is_supported(loaded.load_ms) and loaded.load_ms > 0
+        handle = provider.supervisor.handle_for(identity.provider_model_name)
+        assert handle is not None
+        pid = handle.process.pid
+        table = PosixProcessTable()
+        rss_mib: list[float] = []
+
+        states = provider.list_adapters()
+        assert [state.status for state in states] == [AdapterStatus.REGISTERED] * 3, [
+            state.reason for state in states
+        ]
+        assert all(state.base_confidence is IdentityConfidence.DIGEST for state in states)
+        names = [state.adapter.name for state in states]
+
+        sampling = SamplingParameters(max_output_tokens=32, temperature=0.0, seed=7)
+        walls_ms: list[float] = []
+        cache_reads: list[object] = []
+        for index in range(_WARM_BASE_GENERATIONS):
+            name = names[index % len(names)]
+            started = time.monotonic()
+            result = provider.generate(
+                GenerationRequest(
+                    identity=identity,
+                    prompt=_LIVE_PROMPT,
+                    adapter=name,
+                    runtime_profile=profile,
+                    sampling=sampling,
+                )
+            )
+            walls_ms.append((time.monotonic() - started) * 1000.0)
+            cache_reads.append(result.usage.tokens.cache_read_tokens)
+            rss_mib.append(_rss_bytes(pid) / 2**20)
+            assert result.adapter is not None and result.adapter.name == name
+            assert table.is_alive(pid), f"server {pid} died during generation {index}"
+            current = provider.supervisor.handle_for(identity.provider_model_name)
+            assert current is not None and current.process.pid == pid, (
+                f"generation {index} was answered by a different server: the base was reloaded"
+            )
+
+        loads = [
+            event
+            for event in warm_base_events
+            if event.operation == "load" and event.kind is ProviderEventKind.REQUEST_STARTED
+        ]
+        print(  # noqa: T201 — the evidence
+            f"\nI16: pid={pid} load_ms={loaded.load_ms:.0f} loads_started={len(loads)} "
+            f"generations={len(walls_ms)} wall_ms min/median/max="
+            f"{min(walls_ms):.0f}/{sorted(walls_ms)[len(walls_ms) // 2]:.0f}/{max(walls_ms):.0f} "
+            f"cache_read={cache_reads}\n"
+            f"I16 rss_mib per generation: {[round(value) for value in rss_mib]}"
+        )
+        assert len(loads) == 1, "the base was loaded more than once"
+        assert [resident.identity for resident in provider.list_resident()] == [identity]
+        assert max(walls_ms) < loaded.load_ms, (
+            "one generation took at least as long as the base load did: a reload hid inside it"
+        )
+        # Flat memory: once every adapter has been applied once, the resident set stops moving.
+        # llama-server allocates on first use (compute buffers, then per-adapter state), so the
+        # baseline is the reading after each adapter's first generation, not after the load.
+        settled = rss_mib[len(names) - 1]
+        assert rss_mib[-1] < settled * 1.10, (
+            f"resident set grew from {settled:.0f} MiB to {rss_mib[-1]:.0f} MiB after every "
+            "adapter had already been applied once: that is a leak, not allocation"
         )

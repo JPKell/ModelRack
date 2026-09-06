@@ -8,6 +8,15 @@ packaging and release standards §3.
 ## [Unreleased]
 
 ### Added
+- **The LA1 exit demonstration (I16) as a live test.** `tests/live/test_llamacpp_live.py::TestWarmBase`
+  registers three adapters on one base and runs twenty generations alternating them, asserting
+  zero base loads from three witnesses — the server pid, the `load` events the observer saw, and
+  every generation's wall time against the one measured load — and asserting a flat resident set
+  once every adapter has been applied. Skips naming the third adapter it needs. First run on the
+  reference machine 2026-09-05: one load, twenty generations at ~257 ms each on a 754 ms load,
+  and the canary's three answers distinct — but the resident set grew ~14 MiB per adapter
+  switch, unbounded, in `llama-server` b10792's CUDA build (flat on CPU, flat when the adapter
+  does not change, unaffected by `--cache-ram 0`). The assertion stays; the defect is upstream.
 - **`SamplingParameters.think`, so a declared capability is finally reachable.**
   `thinking_control` has been declared by two adapters since Phase 3 and could be requested by
   nobody: there was no field for it, and `runtime_profile.provider_options` merges into Ollama's
