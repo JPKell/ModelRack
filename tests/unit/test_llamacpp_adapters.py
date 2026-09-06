@@ -847,6 +847,39 @@ class TestPendingRestartAndTheInFlightGuard:
         assert len(states) == 1
         assert states[0].adapter.artifact_sha256 == _digest_of(adapter_files["house-voice"])
 
+    def test_a_name_absent_from_the_new_set_is_retired_at_the_next_idle(
+        self,
+        make_provider: Callable[..., LlamaCppProvider],
+        registration: Callable[..., AdapterRegistration],
+        launcher: FakeLauncher,
+        server: respx.MockRouter,
+    ) -> None:
+        """The set passed is the set held: a rescan that no longer finds a name retires it.
+
+        There is no inverse to ``register_adapters``; the directory is the truth and the
+        application restates it whole. The retired name leaves ``list_adapters`` at once, and the
+        server that launched with it restarts without it at the next idle — one restart, no
+        ``--lora``, and the request body no longer names a ``lora`` set.
+        """
+        provider = make_provider(adapters=[registration()])
+        try:
+            provider.generate(_request(adapter="factcheck"))
+            assert "--lora" in _launch_argv(launcher)
+
+            provider.register_adapters(())
+            assert provider.list_adapters() == ()
+            assert len(launcher.specs) == 1  # retiring alone restarts nothing
+
+            provider.generate(_request())
+            assert len(launcher.specs) == 2
+            assert launcher.processes[0].terminated
+            assert "--lora" not in _launch_argv(launcher)
+            assert "lora" not in _last_body(server)
+            with pytest.raises(AdapterNotFound):
+                provider.generate(_request(adapter="factcheck"))
+        finally:
+            provider.close()
+
     def test_two_requests_in_flight_both_have_to_finish(
         self,
         make_provider: Callable[..., LlamaCppProvider],

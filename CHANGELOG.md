@@ -159,6 +159,13 @@ packaging and release standards §3.
   read, which reproduces that window deterministically, and the `pragma: no cover` is gone.
 
 ### Changed
+- **`register_adapters()` takes the complete set, and has no inverse.** It replaced by name and
+  could add but never retire: a rescan that no longer found an adapter in the operator's directory
+  could not remove it from the provider, so a stale name stayed reservable and kept forcing a
+  restart at every idle. The sequence passed is now the set held — a name absent from it is
+  dropped from `list_adapters()` at once and its server restarts without it at the next natural
+  idle, on the same terms a new registration folds in. An empty sequence clears the registry.
+  Unreleased since Phase 7, so no published caller changes behaviour.
 - The `baseaicore` floor moves to **`>=0.4.2`** (still `<0.5`) — through `>=0.4.1`, which is where
   `AdapterIdentity` and `verify_adapter_base_compatibility` arrived, to `>=0.4.2`, which is where
   `RuntimeProfile.adapters_registered` does. The dependency *set* is unchanged: `baseaicore` and

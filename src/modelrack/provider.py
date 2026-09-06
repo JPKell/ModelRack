@@ -509,19 +509,21 @@ class Provider(Protocol):
         ...
 
     def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None:
-        """Add adapters this provider may serve, without disturbing work in progress.
+        """Replace the set of adapters this provider may serve, without disturbing work in progress.
 
-        The path a rescan takes: an operator drops an adapter, the application reviews the drafted
-        manifest and hands the registration over here. Registration is a **launch-time** property
-        of a llama-server process, so an adapter that arrives after its base started is marked
-        :attr:`~modelrack.adapters.AdapterStatus.PENDING_RESTART` and folds in at the next natural
-        idle — never mid-work (ADR-0062 decision 3).
+        The path a rescan takes: the application reads the operator's adapter directory, reviews
+        the manifests, and hands the **whole** resulting set over here. Registration is a
+        **launch-time** property of a llama-server process, so an adapter that arrives after its
+        base started is marked :attr:`~modelrack.adapters.AdapterStatus.PENDING_RESTART` and folds
+        in at the next natural idle — never mid-work (ADR-0062 decision 3) — and one that is no
+        longer in the set is dropped at that same idle.
 
         Args:
-            adapters: The registrations to add. A name already held is **replaced**, so a rescan
-                that found new bytes under an old name updates the identity rather than
-                duplicating it; the replacement is itself pending a restart wherever its base is
-                already running.
+            adapters: The complete set of registrations. The set passed is the set held: a name
+                already held is **replaced** (new bytes under an old name are a new subject), a
+                name absent from the sequence is **retired**, and an empty sequence clears the
+                registry. There is no inverse method because the directory is the truth and a
+                rescan restates it whole.
 
         Raises:
             CapabilityUnsupported: If this provider declares no ``adapter_hot_swap``.

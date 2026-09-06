@@ -761,25 +761,27 @@ class LlamaCppProvider:
             )
 
     def register_adapters(self, adapters: Sequence[AdapterRegistration]) -> None:
-        """Add adapters this provider may serve, without disturbing anything already running.
+        """Replace the set of adapters this provider may serve, without disturbing running work.
 
         Registration is a **launch-time** property of a llama-server process, so nothing here
         touches a running server: an adapter whose base is already up becomes
         :attr:`~modelrack.adapters.AdapterStatus.PENDING_RESTART` and folds in at the next natural
         idle — the next request that arrives with nothing in flight against that server, or an
         :meth:`unload` (ADR-0062 decision 3). Never mid-work, and never by restarting a server
-        under a stream.
+        under a stream. A name **absent** from the new set is dropped on the same terms: it leaves
+        :meth:`list_adapters` at once, and a running server that launched with it restarts at its
+        next idle without it.
 
         Args:
-            adapters: The registrations to add. A name already held is **replaced**: a rescan that
-                found new bytes under a familiar name is a new subject, and keeping the old one
-                would leave the provider able to serve an identity the operator has retired.
-                Replacing one whose base is running makes the replacement pending, so the running
-                server keeps serving the identity it actually launched with until it restarts.
+            adapters: The **complete** set of registrations, in launch order. The set passed is the
+                set held — the directory the application scanned is the truth, and there is no
+                inverse to call — so a rescan that found new bytes under a familiar name replaces
+                that subject, and one that no longer finds a name retires it. An empty sequence
+                clears the registry. Replacing or dropping an adapter whose base is running changes
+                nothing that server serves until it restarts.
         """
         with self._lock:
-            for registration in adapters:
-                self._registrations[registration.name] = registration
+            self._registrations = {registration.name: registration for registration in adapters}
 
     def _state_for(self, registration: AdapterRegistration) -> AdapterState:
         """Decide one registration's state from what the running servers recorded. Lock held."""

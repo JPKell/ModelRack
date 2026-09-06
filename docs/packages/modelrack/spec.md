@@ -305,7 +305,10 @@ an application-supplied `model_directory` and spawns `llama-server` through an i
 (ADR-0062); both directories it touches are named by the application, and its digest file lives
 in the second (ADR-0071). Adapters are supplied as `AdapterRegistration` objects — at construction
 or through `register_adapters()` — by the application that read the operator's adapter directory;
-this package never reads it (ADR-0061 rule 3).
+this package never reads it (ADR-0061 rule 3). `register_adapters()` takes the **complete** set
+each time: a name absent from it is retired at the next natural idle on the same terms a new one
+folds in, and there is no inverse, because the directory is the truth and a rescan restates it
+whole.
 
 ## 13. Error behaviour
 
