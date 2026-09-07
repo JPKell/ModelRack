@@ -7,6 +7,15 @@ packaging and release standards §3.
 
 ## [Unreleased]
 
+### Added
+- `scripts/probe_thinking_control.py`: measures what a model does with Ollama's `think` control
+  and records the raw bytes of one stream. It talks straight to Ollama rather than through
+  `OllamaProvider`, which is what separates "the parser mis-read the stream" from "the server
+  ended it" — the distinction I6 needed to acquit the parser of
+  `ProviderProtocolError: The stream from … ended without a terminal chunk`. Not a test, not run
+  by CI, and it changes nothing it looks at. Re-run it after an Ollama upgrade or a model pull to
+  refresh the table in the suite's `apps/loadcoach/routing.md` §2.
+
 ## [0.7.1] — 2026-09-06
 
 A single fix, cut as its own release because 0.7.0 was already on PyPI when it was found.
