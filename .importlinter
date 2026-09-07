@@ -14,6 +14,7 @@ forbidden_modules =
     freeweight
     loadcoach
     ideapress
+    promptcadence
 
 [importlinter:contract:no-sibling-packages]
 name = ModelRack must not import sibling suite packages
@@ -25,3 +26,7 @@ forbidden_modules =
     sweatmeter
     weightsdb
     mirrorwall
+    loadledger
+    cutctx
+    toolyard
+    commissioner
