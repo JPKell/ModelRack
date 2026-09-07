@@ -3,7 +3,8 @@
 **Sequence position:** third component. Depends on BaseAiCore Phase 4.
 **Target:** `modelrack 0.5.0` by the end of Phase 5. **Reached 2026-08-26** — all five phases complete.
 Phases 6–8 are the adapter arc's LA1 checkpoint
-([adapter roadmap §4.1](../../roadmap/adapter-roadmap.md)), targeting the next minor (`0.7.0`).
+([adapter roadmap §4.1](../../roadmap/adapter-roadmap.md)), and shipped in `0.7.0`; **`0.7.1` is
+published** and is the current release.
 
 The ordering is deliberate and inherited from the prior project's best decision: **the fake provider
 is built before the real one**, so that every downstream component can be developed and tested

@@ -1,7 +1,9 @@
 # ModelRack — Specification
 
 **Type:** Python package · **Import/distribution name:** `modelrack` · **Layer:** 3 (capability package)
-**Status:** Phases 1–5 implemented in `modelrack 0.5.0`; every §20 acceptance criterion met.
+**Status:** Implemented and published as `modelrack 0.7.1` — Phases 1–5 (`0.5.0`, every §20
+acceptance criterion met) and Phases 6–8, the adapter arc's LA1 checkpoint: `LlamaCppProvider`
+process supervision, launch-time adapter registration and per-request LoRA selection.
 **Decision record:** [ADR-0007](../../adr/0007-provider-abstraction.md).
 
 ---
