@@ -2,7 +2,7 @@
 
 The suite's only model client: a provider-neutral abstraction over local inference runtimes (Ollama first), with a deterministic FakeProvider.
 
-**Status:** `0.7.0` — **Phases 1–8 complete; the package is feature-complete against its
+**Status:** `0.7.1` — **Phases 1–8 complete; the package is feature-complete against its
 [specification](docs/packages/modelrack/spec.md).** The provider-neutral vocabulary, the
 streamed-event union and the `Provider` protocol exist and type-check; a deterministic, scriptable
 `FakeProvider` ships in `modelrack.testing`; three real adapters — `OllamaProvider`,
