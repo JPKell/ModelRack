@@ -77,11 +77,28 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install --require-hashes -r requirements/ci.lock
       - run: pip install . --no-deps
-      - run: pytest -m "not live and not performance" --cov --cov-report=term-missing --cov-fail-under=95
+      - run: pytest -m "not live and not performance" --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=95
+      # diff-cover is not part of the hash-pinned application dependency set, so it is
+      # installed the same way ruff and pip-audit are elsewhere in this file: unpinned, for a
+      # standalone CI tool rather than something the package depends on.
+      - run: pip install diff-cover
+      # Testing standards §10: the repository-wide floor says nothing about whether *this*
+      # change was tested, so diff-cover checks coverage of only the lines this ref changed,
+      # against origin/main (pull requests) or the previous commit (pushes to main).
+      - name: diff-cover
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            diff-cover coverage.xml --compare-branch=origin/main --fail-under=90
+          elif git rev-parse HEAD~1 >/dev/null 2>&1; then
+            diff-cover coverage.xml --compare-branch=HEAD~1 --fail-under=90
+          else
+            echo "No previous commit to diff against (first commit on main); skipping diff-cover."
+          fi
 
   contracts:
     runs-on: ubuntu-latest
