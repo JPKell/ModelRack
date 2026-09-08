@@ -15,6 +15,9 @@ packaging and release standards §3.
   `ProviderProtocolError: The stream from … ended without a terminal chunk`. Not a test, not run
   by CI, and it changes nothing it looks at. Re-run it after an Ollama upgrade or a model pull to
   refresh the table in the suite's `apps/loadcoach/routing.md` §2.
+- `tests/unit/test_readme_version.py` — asserts the version README.md states after its `Status:`
+  line equals `__about__.__version__`, so a release cannot leave the README stale (M9 re-audit,
+  row L7).
 
 ## [0.7.1] — 2026-09-06
 
