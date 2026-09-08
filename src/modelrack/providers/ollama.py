@@ -74,7 +74,6 @@ from modelrack.cache import (
 from modelrack.errors import (
     CapabilityUnsupported,
     ContextLimitExceeded,
-    GenerationCancelled,
     ModelNotFound,
     ProviderError,
     ProviderProtocolError,
@@ -98,6 +97,7 @@ from modelrack.providers._http import (
     build_client,
     iter_capped_lines,
     read_capped_json,
+    request_timeout,
     translate_stream_interruption,
     translate_transport_error,
     truncated_text,
@@ -128,6 +128,7 @@ from modelrack.streaming import (
     ThinkingDelta,
     TokenDelta,
     ToolCallDelta,
+    cancelled_stream,
 )
 from modelrack.types import GenerationResult, ResponseFormatKind, Timing
 
@@ -725,7 +726,7 @@ class OllamaProvider:
         """
         path, body = self._build_request(request, stream=True)
         if request.cancel is not None and request.cancel.is_cancelled:
-            return iter((self._already_cancelled(request),))
+            return iter((self._events.cancelled_before_start(request),))
         start_ns = monotonic_ns()
         self._events.started(
             operation="stream",
@@ -733,7 +734,7 @@ class OllamaProvider:
             metadata=request.metadata,
         )
         prepared = self._client.build_request(
-            "POST", path, json=body, timeout=self._timeout_for(request)
+            "POST", path, json=body, timeout=request_timeout(request.timeout_seconds)
         )
         try:
             response = self._client.send(prepared, stream=True)
@@ -767,90 +768,11 @@ class OllamaProvider:
         except BaseException:
             response.close()
             raise
-        return self._walk(request, response, start_ns)
-
-    def _already_cancelled(self, request: GenerationRequest) -> StreamFailed:
-        """Return the one terminal event a stream cancelled before it began is entitled to.
-
-        Delivered rather than raised, so a caller draining the iterator sees the same terminal
-        event it would have seen had the token been flipped mid-stream — one code path for
-        cancellation, not two — and **no connection is opened at all**: a socket opened solely to
-        be closed on the first chunk is exactly the leak this phase's hardening is about.
-        ``elapsed_ms`` on the emitted event stays ``UNSUPPORTED`` rather than ``0``: nothing was
-        timed, and a zero would claim an instantaneous provider call that never happened
-        (ADR-0016).
-        """
-        self._events.started(
-            operation="stream",
-            model_name=request.identity.provider_model_name,
-            metadata=request.metadata,
+        return self._events.observe_stream(
+            self._drain(request, response, start_ns),
+            request=request,
+            elapsed=lambda: elapsed_ms(start_ns),
         )
-        event = self._cancelled("")
-        self._events.failed(
-            operation="stream",
-            model_name=request.identity.provider_model_name,
-            metadata=request.metadata,
-            error_code=event.error.code,
-        )
-        return event
-
-    def _walk(
-        self, request: GenerationRequest, response: httpx.Response, start_ns: int
-    ) -> Iterator[StreamEvent]:
-        """Observe every event :meth:`_drain` produces, then hand it on unchanged.
-
-        The observation lives here rather than at each ``yield`` inside :meth:`_drain` for one
-        reason worth stating: :meth:`_drain` has six terminal exits, and an emitter called from
-        each of them is an emitter that will eventually be forgotten at a seventh. One wrapper
-        sees them all, so "every stream reports how it ended" is structural rather than a
-        convention.
-
-        Closing the inner generator explicitly in ``finally`` is what keeps the connection
-        guarantee intact across the extra layer. Abandoning *this* generator raises
-        ``GeneratorExit`` at its ``yield``; without the explicit ``close()`` the inner generator's
-        own ``finally`` — the one holding ``response.close()`` — would run only when the garbage
-        collector got to it, which is prompt in CPython and unspecified everywhere else.
-        """
-        model_name = request.identity.provider_model_name
-        events = self._drain(request, response, start_ns)
-        try:
-            for event in events:
-                self._observe(event, request, start_ns, model_name)
-                yield event
-        finally:
-            events.close()
-
-    def _observe(
-        self, event: StreamEvent, request: GenerationRequest, start_ns: int, model_name: str
-    ) -> None:
-        """Emit the observability event matching one stream event, if anyone is listening."""
-        if not self._events.is_observed:
-            return
-        if isinstance(event, StreamCompleted):
-            self._events.completed(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                elapsed_ms=event.result.timing.client_wall_ms,
-                output_tokens=event.result.usage.tokens.output_tokens,
-                finish_reason=event.result.finish_reason.value,
-            )
-        elif isinstance(event, StreamFailed):
-            self._events.failed(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                error_code=event.error.code,
-                elapsed_ms=elapsed_ms(start_ns),
-            )
-        else:
-            self._events.chunk(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                chunk_index=event.index,
-                elapsed_ms=elapsed_ms(start_ns),
-            )
 
     def _drain(
         self, request: GenerationRequest, response: httpx.Response, start_ns: int
@@ -881,7 +803,7 @@ class OllamaProvider:
                 if not line.strip():
                     continue
                 if cancel is not None and cancel.is_cancelled:
-                    yield self._cancelled(answer.getvalue())
+                    yield cancelled_stream(answer.getvalue())
                     return
                 try:
                     payload = json.loads(line)
@@ -965,7 +887,7 @@ class OllamaProvider:
                 return
 
             if cancel is not None and cancel.is_cancelled:
-                yield self._cancelled(answer.getvalue())
+                yield cancelled_stream(answer.getvalue())
                 return
             if terminal_payload is None:  # pragma: no cover — the `else` above always returns first
                 raise AssertionError("stream loop exited without a terminal payload or a return")
@@ -998,21 +920,6 @@ class OllamaProvider:
             yield StreamFailed(error=exc, partial_text=answer.getvalue())
         finally:
             response.close()
-
-    def _cancelled(self, partial_text: str) -> StreamFailed:
-        """Return the terminal event for a stream the caller stopped, its output attached.
-
-        Delivered, not raised: a raise mid-drain would end the generator with no terminal event,
-        indistinguishable from the truncated-stream case this same method's caller already
-        detects separately.
-        """
-        return StreamFailed(
-            error=GenerationCancelled(
-                "Generation was cancelled by the caller's token.",
-                details={"partial_text": partial_text},
-            ),
-            partial_text=partial_text,
-        )
 
     # --------------------------------------------------------------------- content extraction
 
@@ -1118,12 +1025,6 @@ class OllamaProvider:
 
     # ------------------------------------------------------------------------- transport calls
 
-    def _timeout_for(self, request: GenerationRequest) -> float | httpx._client.UseClientDefault:
-        """Return the per-request timeout override, or the client's own default."""
-        if request.timeout_seconds is not None:
-            return request.timeout_seconds
-        return httpx.USE_CLIENT_DEFAULT
-
     def _raise_for_status(
         self, response: httpx.Response, *, model_reference: str | None, context_size: int | None
     ) -> None:
@@ -1177,7 +1078,7 @@ class OllamaProvider:
                 "POST",
                 path,
                 json=body,
-                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+                timeout=request_timeout(timeout),
             ) as response:
                 if response.status_code >= 400:
                     self._raise_for_status(

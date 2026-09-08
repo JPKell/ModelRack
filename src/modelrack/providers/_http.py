@@ -54,6 +54,7 @@ __all__ = [
     "is_loopback_host",
     "iter_capped_lines",
     "read_capped_json",
+    "request_timeout",
     "translate_stream_interruption",
     "translate_transport_error",
     "truncated_text",
@@ -175,6 +176,15 @@ def build_client(
         verify=verify,
         follow_redirects=False,
     )
+
+
+def request_timeout(timeout_seconds: float | None) -> float | httpx._client.UseClientDefault:
+    """Return a request's own timeout, or the client's default when it names none.
+
+    ``None`` on a request means "the adapter's configured default", never "no timeout"
+    (spec §14); the client was built with that default, so this hands the decision back to it.
+    """
+    return timeout_seconds if timeout_seconds is not None else httpx.USE_CLIENT_DEFAULT
 
 
 def _classify_unavailable(message: str) -> ProviderUnavailableReason:

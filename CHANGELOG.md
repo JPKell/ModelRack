@@ -7,6 +7,16 @@ packaging and release standards §3.
 
 ## [Unreleased]
 
+### Changed
+- Internal tightening with no behavioural change. The four adapters' copies of the stream
+  observation wrapper, the cancelled-before-start event and the cancelled terminal event are one
+  `EventEmitter.observe_stream` / `EventEmitter.cancelled_before_start` /
+  `streaming.cancelled_stream`; `EventEmitter`'s four emit methods build through one helper; the
+  per-request timeout default is `_http.request_timeout`. `_ollama_wire.generation_options` is a
+  table, its tool-definition builder delegates to the OpenAI wire module, and
+  `AdapterRegistration.identity` is set once in `__post_init__` rather than lazily. The package
+  docstring now names the adapter axis among the exports.
+
 ### Added
 - `scripts/probe_thinking_control.py`: measures what a model does with Ollama's `think` control
   and records the raw bytes of one stream. It talks straight to Ollama rather than through

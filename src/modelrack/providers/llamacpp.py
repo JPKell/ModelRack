@@ -81,7 +81,6 @@ from modelrack.errors import (
     AdapterNotFound,
     CapabilityUnsupported,
     ContextLimitExceeded,
-    GenerationCancelled,
     ModelNotFound,
     ProfileMismatch,
     ProviderError,
@@ -113,6 +112,7 @@ from modelrack.providers._http import (
     build_client,
     iter_capped_lines,
     read_capped_json,
+    request_timeout,
     translate_stream_interruption,
     translate_transport_error,
     truncated_text,
@@ -176,6 +176,7 @@ from modelrack.streaming import (
     ThinkingDelta,
     TokenDelta,
     ToolCallDelta,
+    cancelled_stream,
 )
 from modelrack.types import GenerationResult, Timing
 
@@ -1221,7 +1222,7 @@ class LlamaCppProvider:
         """
         is_chat, path = self._route(request)
         if request.cancel is not None and request.cancel.is_cancelled:
-            return iter((self._already_cancelled(request),))
+            return iter((self._events.cancelled_before_start(request),))
         handle = self._ensure_server(request)
         selection = self._select_adapter(request, handle)
         body = self._build_body(request, handle, is_chat=is_chat, stream=True, selection=selection)
@@ -1233,7 +1234,10 @@ class LlamaCppProvider:
             metadata=request.metadata,
         )
         prepared = self._client.build_request(
-            "POST", handle.base_url + path, json=body, timeout=self._timeout_for(request)
+            "POST",
+            handle.base_url + path,
+            json=body,
+            timeout=request_timeout(request.timeout_seconds),
         )
         try:
             response = self._client.send(prepared, stream=True)
@@ -1268,13 +1272,16 @@ class LlamaCppProvider:
             response.close()
             lease.release()
             raise
-        events = self._walk(
-            request, response, start_ns, handle, is_chat=is_chat, selection=selection, lease=lease
+        events = self._events.observe_stream(
+            self._drain(request, response, start_ns, handle, is_chat=is_chat, selection=selection),
+            request=request,
+            elapsed=lambda: elapsed_ms(start_ns, self._monotonic()),
+            on_close=lease.release,
         )
         # A caller may take the iterator and never start it — the response is already open, so the
-        # claim is already taken and `_walk`'s `finally` will never run to give it back. Releasing
-        # on collection is what keeps an abandoned stream from making a server un-restartable for
-        # the life of the process.
+        # claim is already taken and `observe_stream`'s `finally` will never run to give it back.
+        # Releasing on collection is what keeps an abandoned stream from making a server
+        # un-restartable for the life of the process.
         weakref.finalize(events, lease.release)
         return events
 
@@ -2026,87 +2033,6 @@ class LlamaCppProvider:
             backend_decode_ms=backend.backend_decode_ms,
         )
 
-    def _already_cancelled(self, request: GenerationRequest) -> StreamFailed:
-        """The one terminal event a stream cancelled before it began is entitled to.
-
-        Delivered rather than raised, so a caller has one cancellation path; no server is
-        spawned and no connection opened for a request nobody wants any more.
-        """
-        self._events.started(
-            operation="stream",
-            model_name=request.identity.provider_model_name,
-            metadata=request.metadata,
-        )
-        event = self._cancelled("")
-        self._events.failed(
-            operation="stream",
-            model_name=request.identity.provider_model_name,
-            metadata=request.metadata,
-            error_code=event.error.code,
-        )
-        return event
-
-    def _walk(
-        self,
-        request: GenerationRequest,
-        response: httpx.Response,
-        start_ns: int,
-        handle: ServerHandle,
-        *,
-        is_chat: bool,
-        selection: _Selection | None = None,
-        lease: _InFlightLease | None = None,
-    ) -> Iterator[StreamEvent]:
-        """Observe every event :meth:`_drain` produces, then hand it on unchanged.
-
-        See :meth:`modelrack.providers.ollama.OllamaProvider._walk` for why observation lives in
-        one wrapper and why the inner generator is closed explicitly in ``finally``.
-        """
-        model_name = request.identity.provider_model_name
-        events = self._drain(
-            request, response, start_ns, handle, is_chat=is_chat, selection=selection
-        )
-        try:
-            for event in events:
-                self._observe(event, request, start_ns, model_name)
-                yield event
-        finally:
-            events.close()
-            if lease is not None:
-                lease.release()
-
-    def _observe(
-        self, event: StreamEvent, request: GenerationRequest, start_ns: int, model_name: str
-    ) -> None:
-        """Emit the observability event matching one stream event, if anyone is listening."""
-        if not self._events.is_observed:
-            return
-        if isinstance(event, StreamCompleted):
-            self._events.completed(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                elapsed_ms=event.result.timing.client_wall_ms,
-                output_tokens=event.result.usage.tokens.output_tokens,
-                finish_reason=event.result.finish_reason.value,
-            )
-        elif isinstance(event, StreamFailed):
-            self._events.failed(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                error_code=event.error.code,
-                elapsed_ms=elapsed_ms(start_ns, self._monotonic()),
-            )
-        else:
-            self._events.chunk(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                chunk_index=event.index,
-                elapsed_ms=elapsed_ms(start_ns, self._monotonic()),
-            )
-
     def _drain(  # noqa: C901 — one state machine, two wire shapes; splitting it would hide the terminal rule
         self,
         request: GenerationRequest,
@@ -2146,7 +2072,7 @@ class LlamaCppProvider:
             )
             for data in iter_sse_events(lines):
                 if cancel is not None and cancel.is_cancelled:
-                    yield self._cancelled(answer.getvalue())
+                    yield cancelled_stream(answer.getvalue())
                     return
                 if is_chat and data == _DONE_SENTINEL:
                     completed = True
@@ -2273,7 +2199,7 @@ class LlamaCppProvider:
                 # event and this one. Normally that means another thread; the test reproduces it
                 # deterministically with a token that flips on a chosen read, because without
                 # this branch a stream the caller stopped would be reported as completed.
-                yield self._cancelled(answer.getvalue())
+                yield cancelled_stream(answer.getvalue())
                 return
             wall_ms = elapsed_ms(start_ns, self._monotonic())
             ttft_ms = (
@@ -2333,16 +2259,6 @@ class LlamaCppProvider:
         finally:
             response.close()
 
-    def _cancelled(self, partial_text: str) -> StreamFailed:
-        """The terminal event for a stream the caller stopped, its output attached."""
-        return StreamFailed(
-            error=GenerationCancelled(
-                "Generation was cancelled by the caller's token.",
-                details={"partial_text": partial_text},
-            ),
-            partial_text=partial_text,
-        )
-
     # ------------------------------------------------------------------------- transport
 
     def _build_message_error(
@@ -2399,12 +2315,6 @@ class LlamaCppProvider:
             },
         )
 
-    def _timeout_for(self, request: GenerationRequest) -> float | httpx._client.UseClientDefault:
-        """Return the per-request timeout override, or the client's own default."""
-        if request.timeout_seconds is not None:
-            return request.timeout_seconds
-        return httpx.USE_CLIENT_DEFAULT
-
     def _raise_for_status(
         self, response: httpx.Response, handle: ServerHandle, *, context_size: int | None
     ) -> None:
@@ -2448,7 +2358,7 @@ class LlamaCppProvider:
                 "POST",
                 handle.base_url + path,
                 json=body,
-                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+                timeout=request_timeout(timeout),
             ) as response:
                 if response.status_code >= 400:
                     self._raise_for_status(response, handle, context_size=context_size)

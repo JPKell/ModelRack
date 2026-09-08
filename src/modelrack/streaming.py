@@ -40,6 +40,7 @@ __all__ = [
     "ThinkingDelta",
     "TokenDelta",
     "ToolCallDelta",
+    "cancelled_stream",
 ]
 
 
@@ -262,3 +263,24 @@ A closed union, so a caller can exhaustively match on it and a type checker will
 member makes that match incomplete. Adding a member is a breaking change to every consumer that
 matches exhaustively, which is why the set is small and each member earns its place.
 """
+
+
+def cancelled_stream(partial_text: str = "") -> StreamFailed:
+    """Return the terminal event for a stream the caller's token stopped, its output attached.
+
+    Delivered, never raised: a raise mid-drain ends the iterator with no terminal event, which is
+    exactly how this module defines a *truncated* stream, and "the caller stopped it" must stay
+    distinguishable from "the connection dropped". Every adapter yields this same event, so the
+    partial text is preserved the same way from all of them.
+
+    Args:
+        partial_text: Whatever the model had produced before the stop — the caller's own output,
+            which is why this is the one error whose ``details`` carries generated content.
+    """
+    return StreamFailed(
+        error=GenerationCancelled(
+            "Generation was cancelled by the caller's token.",
+            details={"partial_text": partial_text},
+        ),
+        partial_text=partial_text,
+    )

@@ -246,9 +246,6 @@ def iter_sse_events(lines: Iterable[str]) -> Iterator[str]:
         if line.startswith(":"):
             continue
         if line.startswith("data:"):
-            value = line[len("data:") :]
-            if value.startswith(" "):
-                value = value[1:]
-            data_lines.append(value)
+            data_lines.append(line.removeprefix("data:").removeprefix(" "))
     if data_lines:
         yield "\n".join(data_lines)

@@ -47,11 +47,14 @@ from baseaicore import (
 )
 
 from modelrack.providers._gguf import head_dim_of
+from modelrack.providers._openai_wire import request_tool_definitions as openai_tool_definitions
 from modelrack.types import FinishReason, GenerationUsage, Timing, ToolCall
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
+
+    from modelrack.types import ToolDefinition
 
 __all__ = [
     "as_measurement",
@@ -69,6 +72,13 @@ __all__ = [
 ]
 
 _NANOSECONDS_PER_MILLISECOND: Final[int] = 1_000_000
+
+_DONE_REASONS: Final[dict[str, FinishReason]] = {
+    "stop": FinishReason.STOP,
+    "length": FinishReason.LENGTH,
+    "load": FinishReason.STOP,
+    "unload": FinishReason.STOP,
+}
 
 _DECLARED_CAPABILITY_NAMES: Final[dict[str, ModelCapabilityFlag]] = {
     "tools": ModelCapabilityFlag.TOOLS,
@@ -305,51 +315,32 @@ def generation_options(
     escape hatch: a caller who knows the exact Ollama option name for something this function does
     not translate can always reach it.
     """
-    options: dict[str, Any] = {}
-    if temperature is not None:
-        options["temperature"] = temperature
-    if top_p is not None:
-        options["top_p"] = top_p
-    if top_k is not None:
-        options["top_k"] = top_k
-    if seed is not None:
-        options["seed"] = seed
-    if max_output_tokens is not None:
-        options["num_predict"] = max_output_tokens
-    if stop:
-        options["stop"] = list(stop)
-    if repeat_penalty is not None:
-        options["repeat_penalty"] = repeat_penalty
-    if context_size is not None:
-        options["num_ctx"] = context_size
-    if gpu_layers is not None:
-        options["num_gpu"] = gpu_layers
-    if threads is not None:
-        options["num_thread"] = threads
-    if batch_size is not None:
-        options["num_batch"] = batch_size
+    named = (
+        ("temperature", temperature),
+        ("top_p", top_p),
+        ("top_k", top_k),
+        ("seed", seed),
+        ("num_predict", max_output_tokens),
+        ("stop", list(stop) if stop else None),
+        ("repeat_penalty", repeat_penalty),
+        ("num_ctx", context_size),
+        ("num_gpu", gpu_layers),
+        ("num_thread", threads),
+        ("num_batch", batch_size),
+    )
+    options: dict[str, Any] = {key: value for key, value in named if value is not None}
     options.update(provider_options)
     return options
 
 
-def request_tool_definitions(tools: Sequence[Any]) -> list[dict[str, Any]]:
+def request_tool_definitions(tools: Sequence[ToolDefinition]) -> list[dict[str, Any]]:
     """Build Ollama's tool list from :class:`~modelrack.types.ToolDefinition` values.
 
     Ollama adopted the OpenAI function-calling shape for tools
-    (``{"type": "function", "function": {...}}``); this is the one translation, kept beside the
-    other request-building functions rather than inlined in the adapter.
+    (``{"type": "function", "function": {...}}``), so this is that translation, shared rather
+    than restated.
     """
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": dict(tool.parameters),
-            },
-        }
-        for tool in tools
-    ]
+    return openai_tool_definitions(tools)
 
 
 def finish_reason_for(done_reason: Any, *, has_tool_calls: bool) -> FinishReason:  # noqa: ANN401 — provider JSON
@@ -362,17 +353,9 @@ def finish_reason_for(done_reason: Any, *, has_tool_calls: bool) -> FinishReason
     """
     if has_tool_calls:
         return FinishReason.TOOL_CALLS
-    mapped = {
-        "stop": FinishReason.STOP,
-        "length": FinishReason.LENGTH,
-        "load": FinishReason.STOP,
-        "unload": FinishReason.STOP,
-    }
-    return (
-        mapped.get(done_reason, FinishReason.UNKNOWN)
-        if isinstance(done_reason, str)
-        else (FinishReason.UNKNOWN)
-    )
+    if isinstance(done_reason, str):
+        return _DONE_REASONS.get(done_reason, FinishReason.UNKNOWN)
+    return FinishReason.UNKNOWN
 
 
 def parse_tool_calls(

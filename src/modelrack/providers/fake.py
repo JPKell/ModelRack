@@ -89,7 +89,6 @@ from baseaicore import (
 
 from modelrack.errors import (
     ContextLimitExceeded,
-    GenerationCancelled,
     ModelNotFound,
     ProviderError,
     ProviderUnavailable,
@@ -127,7 +126,13 @@ from modelrack.providers._fake_script import (
     FakeScript,
     FakeToolCall,
 )
-from modelrack.streaming import StreamCompleted, StreamEvent, StreamFailed, TokenDelta
+from modelrack.streaming import (
+    StreamCompleted,
+    StreamEvent,
+    StreamFailed,
+    TokenDelta,
+    cancelled_stream,
+)
 from modelrack.types import (
     FinishReason,
     GenerationRequest,
@@ -138,7 +143,7 @@ from modelrack.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Generator, Iterator, Sequence
     from datetime import datetime
 
     from baseaicore import RuntimeProfile
@@ -540,17 +545,7 @@ class FakeProvider:
         model_name = request.identity.provider_model_name
         self._require_declared(request, streaming=True)
         if request.cancel is not None and request.cancel.is_cancelled:
-            self._events.started(
-                operation="stream", model_name=model_name, metadata=request.metadata
-            )
-            event = self._cancelled("")
-            self._events.failed(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                error_code=event.error.code,
-            )
-            return iter((event,))
+            return iter((self._events.cancelled_before_start(request),))
         plan, limit_ms = self._prepare(request, streaming=True)
         self._events.started(operation="stream", model_name=model_name, metadata=request.metadata)
         if plan.failure is not None and plan.failure_step is None:
@@ -564,45 +559,9 @@ class FakeProvider:
                 error_code=error.code,
             )
             raise error
-        return self._observed(self._walk(plan, request, limit_ms), request, model_name)
-
-    def _observed(
-        self, events: Iterator[StreamEvent], request: GenerationRequest, model_name: str
-    ) -> Iterator[StreamEvent]:
-        """Emit one observability event per stream event, then hand each on unchanged.
-
-        The same wrapper shape both real adapters use, for the same reason: :meth:`_walk` has six
-        terminal exits, and an emitter called from each of them is one that will be forgotten at a
-        seventh.
-        """
-        for event in events:
-            if not self._events.is_observed:
-                yield event
-                continue
-            if isinstance(event, StreamCompleted):
-                self._events.completed(
-                    operation="stream",
-                    model_name=model_name,
-                    metadata=request.metadata,
-                    elapsed_ms=event.result.timing.client_wall_ms,
-                    output_tokens=event.result.usage.tokens.output_tokens,
-                    finish_reason=event.result.finish_reason.value,
-                )
-            elif isinstance(event, StreamFailed):
-                self._events.failed(
-                    operation="stream",
-                    model_name=model_name,
-                    metadata=request.metadata,
-                    error_code=event.error.code,
-                )
-            else:
-                self._events.chunk(
-                    operation="stream",
-                    model_name=model_name,
-                    metadata=request.metadata,
-                    chunk_index=event.index,
-                )
-            yield event
+        return self._events.observe_stream(
+            self._walk(plan, request, limit_ms), request=request, elapsed=lambda: UNSUPPORTED
+        )
 
     def load(self, identity: ModelIdentity, profile: RuntimeProfile) -> LoadResult:
         """Mark a model resident, reporting whether it already was.
@@ -1146,33 +1105,16 @@ class FakeProvider:
             raw=plan.raw,
         )
 
-    def _cancelled(self, partial_text: str) -> StreamFailed:
-        """Return the terminal event for a stream the caller stopped, with its output attached.
-
-        Delivered rather than raised. A raise mid-drain ends the iterator with no terminal event,
-        which is exactly how :mod:`modelrack.streaming` defines a *truncated* stream — so raising
-        here would make "the caller stopped it" indistinguishable from "the connection dropped".
-        The partial text is the caller's own output being handed back, which is why this is the
-        one error whose ``details`` may carry generated content.
-        """
-        return StreamFailed(
-            error=GenerationCancelled(
-                "Generation was cancelled by the caller's token.",
-                details={"partial_text": partial_text},
-            ),
-            partial_text=partial_text,
-        )
-
     def _walk(
         self, plan: _Plan, request: GenerationRequest, limit_ms: float
-    ) -> Iterator[StreamEvent]:
+    ) -> Generator[StreamEvent, None, None]:
         """Yield the planned deltas, then exactly one terminal event, and nothing after it."""
         cancel = request.cancel
         answer: list[str] = []
         elapsed_ms = 0.0
         for index, step in enumerate(plan.steps):
             if cancel is not None and cancel.is_cancelled:
-                yield self._cancelled("".join(answer))
+                yield cancelled_stream("".join(answer))
                 return
             if plan.failure is not None and plan.failure_step == index:
                 yield StreamFailed(
@@ -1197,13 +1139,13 @@ class FakeProvider:
             # sleep has to take effect on this delta, not the next one. This is what "within one
             # chunk boundary" (spec §11.6) costs to actually deliver.
             if cancel is not None and cancel.is_cancelled:
-                yield self._cancelled("".join(answer))
+                yield cancelled_stream("".join(answer))
                 return
             yield step.event
             if isinstance(step.event, TokenDelta):
                 answer.append(step.event.text)
         if cancel is not None and cancel.is_cancelled:
-            yield self._cancelled("".join(answer))
+            yield cancelled_stream("".join(answer))
             return
         if plan.failure is not None:
             yield StreamFailed(

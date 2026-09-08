@@ -120,11 +120,10 @@ class AdapterRegistration:
     base_artifact_digest: str | None = None
     adapter_format: str = GGUF_ADAPTER_FORMAT
 
-    # Derived, cached on first use, and invisible to equality, hashing and repr — the same
-    # treatment ModelIdentity gives its canonical ID.
-    _identity_cache: AdapterIdentity | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
+    # Derived in __post_init__ and invisible to equality, hashing and repr — the same treatment
+    # ModelIdentity gives its canonical ID, computed eagerly because constructing it is also what
+    # validates `name`.
+    _identity: AdapterIdentity = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Normalize the digests and refuse a registration that could not be applied honestly."""
@@ -153,7 +152,7 @@ class AdapterRegistration:
         # and is not restated, so the two cannot drift on an escaping detail.
         object.__setattr__(
             self,
-            "_identity_cache",
+            "_identity",
             AdapterIdentity(
                 name=self.name,
                 artifact_digest=self.artifact_sha256,
@@ -169,17 +168,7 @@ class AdapterRegistration:
         explanations key on is defined once, in the domain foundation, and every component reads
         the same definition (ADR-0058 §1).
         """
-        cached = self._identity_cache
-        # Unreachable after __post_init__, which always fills it; the check is what makes the
-        # property total for mypy without an assert that could be stripped under -O.
-        if cached is None:  # pragma: no cover — __post_init__ always sets it
-            cached = AdapterIdentity(
-                name=self.name,
-                artifact_digest=self.artifact_sha256,
-                source_digest=self.source_sha256,
-            )
-            object.__setattr__(self, "_identity_cache", cached)
-        return cached
+        return self._identity
 
 
 class AdapterStatus(StrEnum):

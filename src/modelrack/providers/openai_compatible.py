@@ -93,7 +93,6 @@ from modelrack.cache import (
 )
 from modelrack.errors import (
     ContextLimitExceeded,
-    GenerationCancelled,
     ModelNotFound,
     ProviderError,
     ProviderProtocolError,
@@ -117,6 +116,7 @@ from modelrack.providers._http import (
     build_client,
     iter_capped_lines,
     read_capped_json,
+    request_timeout,
     translate_stream_interruption,
     translate_transport_error,
     truncated_text,
@@ -141,6 +141,7 @@ from modelrack.streaming import (
     StreamFailed,
     TokenDelta,
     ToolCallDelta,
+    cancelled_stream,
 )
 from modelrack.types import (
     GenerationResult,
@@ -603,7 +604,7 @@ class OpenAICompatibleProvider:
         """
         body = self._build_body(request, stream=True)
         if request.cancel is not None and request.cancel.is_cancelled:
-            return iter((self._already_cancelled(request),))
+            return iter((self._events.cancelled_before_start(request),))
         start_ns = monotonic_ns()
         self._events.started(
             operation="stream",
@@ -611,7 +612,10 @@ class OpenAICompatibleProvider:
             metadata=request.metadata,
         )
         prepared = self._client.build_request(
-            "POST", "/v1/chat/completions", json=body, timeout=self._timeout_for(request)
+            "POST",
+            "/v1/chat/completions",
+            json=body,
+            timeout=request_timeout(request.timeout_seconds),
         )
         try:
             response = self._client.send(prepared, stream=True)
@@ -643,79 +647,11 @@ class OpenAICompatibleProvider:
         except BaseException:
             response.close()
             raise
-        return self._walk(request, response, start_ns)
-
-    def _already_cancelled(self, request: GenerationRequest) -> StreamFailed:
-        """Return the terminal event for a stream whose token was already set before it began.
-
-        Opens no connection at all — see
-        :meth:`modelrack.providers.ollama.OllamaProvider._already_cancelled`, which this mirrors
-        exactly, because cancellation semantics belong to the protocol rather than to a wire
-        format (spec §11.6).
-        """
-        self._events.started(
-            operation="stream",
-            model_name=request.identity.provider_model_name,
-            metadata=request.metadata,
+        return self._events.observe_stream(
+            self._drain(request, response, start_ns),
+            request=request,
+            elapsed=lambda: elapsed_ms(start_ns),
         )
-        event = self._cancelled("")
-        self._events.failed(
-            operation="stream",
-            model_name=request.identity.provider_model_name,
-            metadata=request.metadata,
-            error_code=event.error.code,
-        )
-        return event
-
-    def _walk(
-        self, request: GenerationRequest, response: httpx.Response, start_ns: int
-    ) -> Iterator[StreamEvent]:
-        """Observe every event :meth:`_drain` produces, then hand it on unchanged.
-
-        Mirrors :meth:`modelrack.providers.ollama.OllamaProvider._walk`, including the explicit
-        ``events.close()``: without it, the inner generator's ``finally`` — the one holding
-        ``response.close()`` — would run only when the garbage collector reached it.
-        """
-        model_name = request.identity.provider_model_name
-        events = self._drain(request, response, start_ns)
-        try:
-            for event in events:
-                self._observe(event, request, start_ns, model_name)
-                yield event
-        finally:
-            events.close()
-
-    def _observe(
-        self, event: StreamEvent, request: GenerationRequest, start_ns: int, model_name: str
-    ) -> None:
-        """Emit the observability event matching one stream event, if anyone is listening."""
-        if not self._events.is_observed:
-            return
-        if isinstance(event, StreamCompleted):
-            self._events.completed(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                elapsed_ms=event.result.timing.client_wall_ms,
-                output_tokens=event.result.usage.tokens.output_tokens,
-                finish_reason=event.result.finish_reason.value,
-            )
-        elif isinstance(event, StreamFailed):
-            self._events.failed(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                error_code=event.error.code,
-                elapsed_ms=elapsed_ms(start_ns),
-            )
-        else:
-            self._events.chunk(
-                operation="stream",
-                model_name=model_name,
-                metadata=request.metadata,
-                chunk_index=event.index,
-                elapsed_ms=elapsed_ms(start_ns),
-            )
 
     def _drain(
         self, request: GenerationRequest, response: httpx.Response, start_ns: int
@@ -743,7 +679,7 @@ class OpenAICompatibleProvider:
             )
             for data in iter_sse_events(lines):
                 if cancel is not None and cancel.is_cancelled:
-                    yield self._cancelled(answer.getvalue())
+                    yield cancelled_stream(answer.getvalue())
                     return
                 if data == "[DONE]":
                     seen_done = True
@@ -839,7 +775,7 @@ class OpenAICompatibleProvider:
                 # always its own SSE event, never sharing an iteration with a content delta the
                 # way Ollama's terminal NDJSON line does, so a single-threaded test cannot land
                 # here deterministically. Kept as the honest defensive check for that race.
-                yield self._cancelled(answer.getvalue())
+                yield cancelled_stream(answer.getvalue())
                 return
             tool_calls = tuple(
                 tool_call_from_parts(
@@ -883,16 +819,6 @@ class OpenAICompatibleProvider:
         finally:
             response.close()
 
-    def _cancelled(self, partial_text: str) -> StreamFailed:
-        """Return the terminal event for a stream the caller stopped, its output attached."""
-        return StreamFailed(
-            error=GenerationCancelled(
-                "Generation was cancelled by the caller's token.",
-                details={"partial_text": partial_text},
-            ),
-            partial_text=partial_text,
-        )
-
     def _build_message_error(
         self, message: str, *, code: str | None, status_code: int
     ) -> ContextLimitExceeded | ProviderRejected:
@@ -909,12 +835,6 @@ class OpenAICompatibleProvider:
         )
 
     # ------------------------------------------------------------------------- transport calls
-
-    def _timeout_for(self, request: GenerationRequest) -> float | httpx._client.UseClientDefault:
-        """Return the per-request timeout override, or the client's own default."""
-        if request.timeout_seconds is not None:
-            return request.timeout_seconds
-        return httpx.USE_CLIENT_DEFAULT
 
     def _raise_for_status(self, response: httpx.Response, *, model_reference: str | None) -> None:
         """Translate a non-2xx response into the typed error spec §13 names for it, and raise it."""
@@ -960,7 +880,7 @@ class OpenAICompatibleProvider:
                 "POST",
                 path,
                 json=body,
-                timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
+                timeout=request_timeout(timeout),
             ) as response:
                 if response.status_code >= 400:
                     self._raise_for_status(response, model_reference=model_reference)

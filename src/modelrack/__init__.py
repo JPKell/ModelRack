@@ -6,13 +6,14 @@ that FreeWeight, LoadCoach and IdeaPress never contain provider HTTP code, never
 JSON, and never disagree about what a token count or a timing means
 ([spec §1](../../docs/packages/modelrack/spec.md)).
 
-What is exported below is the public API as of Phase 5
+What is exported below is the public API as of Phase 8
 (``docs/packages/modelrack/development-plan.md``): the provider-neutral request and result
 vocabulary, the streamed-event union with its cancellation token, the ``Provider`` protocol and the
-types describing what a provider is, the full error hierarchy, and the three operational modules
+types describing what a provider is, the full error hierarchy, the three operational modules
 Phase 5 added — the residency vocabulary (:mod:`modelrack.residency`), the one metadata cache this
 package is allowed to have (:mod:`modelrack.cache`), and the optional observability hook
-(:mod:`modelrack.events`).
+(:mod:`modelrack.events`) — and the adapter axis Phase 8 added (:mod:`modelrack.adapters`): the
+LoRA registrations an application hands a provider, and the state each one is in.
 
 The first adapter that ships is the **fake** one, deliberately
 (ADR-0007 rule 6): ``FakeProvider`` is imported from

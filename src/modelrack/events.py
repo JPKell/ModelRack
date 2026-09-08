@@ -34,10 +34,15 @@ from typing import TYPE_CHECKING, Any
 
 from baseaicore import UNSUPPORTED, Measurement, TokenCount, ValidationError
 
+from modelrack.streaming import StreamCompleted, StreamFailed, cancelled_stream
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Generator, Iterator, Mapping
 
     from baseaicore import ProviderKind
+
+    from modelrack.streaming import StreamEvent
+    from modelrack.types import GenerationRequest
 
 __all__ = [
     "EventCallback",
@@ -206,19 +211,18 @@ class EventEmitter:
         """
         return self._callback is not None
 
+    def _emit(self, kind: ProviderEventKind, **fields: Any) -> None:  # noqa: ANN401 — ProviderEvent's own field types
+        """Build and deliver one event of ``kind``, if anyone is listening."""
+        if self._callback is not None:
+            emit(self._callback, ProviderEvent(kind, provider_kind=self._provider_kind, **fields))
+
     def started(self, *, operation: str, model_name: str, metadata: Mapping[str, Any]) -> None:
         """Emit :attr:`ProviderEventKind.REQUEST_STARTED` for one call."""
-        if self._callback is None:
-            return
-        emit(
-            self._callback,
-            ProviderEvent(
-                kind=ProviderEventKind.REQUEST_STARTED,
-                operation=operation,
-                provider_kind=self._provider_kind,
-                model_name=model_name,
-                metadata=metadata,
-            ),
+        self._emit(
+            ProviderEventKind.REQUEST_STARTED,
+            operation=operation,
+            model_name=model_name,
+            metadata=metadata,
         )
 
     def chunk(
@@ -231,19 +235,13 @@ class EventEmitter:
         elapsed_ms: Measurement = UNSUPPORTED,
     ) -> None:
         """Emit :attr:`ProviderEventKind.CHUNK_RECEIVED` for one delta."""
-        if self._callback is None:
-            return
-        emit(
-            self._callback,
-            ProviderEvent(
-                kind=ProviderEventKind.CHUNK_RECEIVED,
-                operation=operation,
-                provider_kind=self._provider_kind,
-                model_name=model_name,
-                metadata=metadata,
-                chunk_index=chunk_index,
-                elapsed_ms=elapsed_ms,
-            ),
+        self._emit(
+            ProviderEventKind.CHUNK_RECEIVED,
+            operation=operation,
+            model_name=model_name,
+            metadata=metadata,
+            chunk_index=chunk_index,
+            elapsed_ms=elapsed_ms,
         )
 
     def completed(
@@ -257,20 +255,14 @@ class EventEmitter:
         finish_reason: str | None = None,
     ) -> None:
         """Emit :attr:`ProviderEventKind.REQUEST_COMPLETED` for one finished call."""
-        if self._callback is None:
-            return
-        emit(
-            self._callback,
-            ProviderEvent(
-                kind=ProviderEventKind.REQUEST_COMPLETED,
-                operation=operation,
-                provider_kind=self._provider_kind,
-                model_name=model_name,
-                metadata=metadata,
-                elapsed_ms=elapsed_ms,
-                output_tokens=output_tokens,
-                finish_reason=finish_reason,
-            ),
+        self._emit(
+            ProviderEventKind.REQUEST_COMPLETED,
+            operation=operation,
+            model_name=model_name,
+            metadata=metadata,
+            elapsed_ms=elapsed_ms,
+            output_tokens=output_tokens,
+            finish_reason=finish_reason,
         )
 
     def failed(
@@ -283,17 +275,100 @@ class EventEmitter:
         elapsed_ms: Measurement = UNSUPPORTED,
     ) -> None:
         """Emit :attr:`ProviderEventKind.REQUEST_FAILED` for one failed call."""
-        if self._callback is None:
-            return
-        emit(
-            self._callback,
-            ProviderEvent(
-                kind=ProviderEventKind.REQUEST_FAILED,
-                operation=operation,
-                provider_kind=self._provider_kind,
-                model_name=model_name,
-                metadata=metadata,
-                elapsed_ms=elapsed_ms,
-                error_code=error_code,
-            ),
+        self._emit(
+            ProviderEventKind.REQUEST_FAILED,
+            operation=operation,
+            model_name=model_name,
+            metadata=metadata,
+            elapsed_ms=elapsed_ms,
+            error_code=error_code,
         )
+
+    def cancelled_before_start(self, request: GenerationRequest) -> StreamFailed:
+        """Return the one terminal event a stream cancelled before it began is entitled to.
+
+        Emits the ``started``/``failed`` pair around it, so an observer sees the same shape it
+        sees for any other stream. No connection is opened and nothing is timed: ``elapsed_ms``
+        stays ``UNSUPPORTED`` rather than ``0``, which would claim an instantaneous provider call
+        that never happened (ADR-0016).
+        """
+        model_name = request.identity.provider_model_name
+        self.started(operation="stream", model_name=model_name, metadata=request.metadata)
+        event = cancelled_stream()
+        self.failed(
+            operation="stream",
+            model_name=model_name,
+            metadata=request.metadata,
+            error_code=event.error.code,
+        )
+        return event
+
+    def observe_stream(
+        self,
+        events: Generator[StreamEvent, None, None],
+        *,
+        request: GenerationRequest,
+        elapsed: Callable[[], Measurement],
+        on_close: Callable[[], None] | None = None,
+    ) -> Iterator[StreamEvent]:
+        """Hand every event of ``events`` on unchanged, emitting the matching observability event.
+
+        One wrapper rather than an emitter call at each of a drain's terminal exits: a drain has
+        six of them, and an emitter called from each will be forgotten at a seventh. Closing the
+        inner generator explicitly in ``finally`` is what keeps an adapter's connection guarantee
+        intact across the extra layer — abandoning *this* generator raises ``GeneratorExit`` at
+        its ``yield``, and without the explicit ``close()`` the inner ``finally`` holding
+        ``response.close()`` would run only when the garbage collector reached it.
+
+        Args:
+            events: The adapter's drain, owning whatever connection is open.
+            request: The request being streamed, for its model name and metadata.
+            elapsed: Returns milliseconds since the stream started, stamped on chunk and failure
+                events. A completion carries the result's own ``client_wall_ms`` instead.
+            on_close: Called once after the inner generator is closed, however the stream ended.
+        """
+        model_name = request.identity.provider_model_name
+        try:
+            for event in events:
+                if self._callback is not None:
+                    self._observe(event, model_name=model_name, request=request, elapsed=elapsed)
+                yield event
+        finally:
+            events.close()
+            if on_close is not None:
+                on_close()
+
+    def _observe(
+        self,
+        event: StreamEvent,
+        *,
+        model_name: str,
+        request: GenerationRequest,
+        elapsed: Callable[[], Measurement],
+    ) -> None:
+        """Emit the observability event matching one stream event."""
+        if isinstance(event, StreamCompleted):
+            self.completed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                elapsed_ms=event.result.timing.client_wall_ms,
+                output_tokens=event.result.usage.tokens.output_tokens,
+                finish_reason=event.result.finish_reason.value,
+            )
+        elif isinstance(event, StreamFailed):
+            self.failed(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                error_code=event.error.code,
+                elapsed_ms=elapsed(),
+            )
+        else:
+            self.chunk(
+                operation="stream",
+                model_name=model_name,
+                metadata=request.metadata,
+                chunk_index=event.index,
+                elapsed_ms=elapsed(),
+            )
