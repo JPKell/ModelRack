@@ -5,7 +5,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); version
 [Semantic Versioning](https://semver.org/), pre-1.0 per
 packaging and release standards §3.
 
-## [Unreleased]
+## [0.8.0] — 2026-09-09
+
+### Added
+- `LlamaCppProvider(memory_max_bytes=, memory_high_bytes=)` — a host-memory cap for every
+  `llama-server` it launches (ADR-0119, row N4). The launch runs in a
+  `systemd-run --user --scope` with `MemoryMax`, optional `MemoryHigh` and `MemorySwapMax=0`, so a
+  server that does not fit is killed by the kernel in milliseconds instead of swapping the host
+  into a thrash. `systemd-run` execs the server in place, so the pid, session, stderr file and pid
+  record are the server's own; the recorded command line carries the resolved executable, which is
+  what `/proc/<pid>/cmdline` shows and what the orphan sweep compares against. A cap configured on
+  a host without `systemd-run` is a `ProviderUnavailable` (`launch_failed`) naming both — never a
+  silent uncapped launch. `None`, the default, launches exactly as before. Proven live: a 64 MiB
+  cap killed a real server (`SIGKILL`, exit −9) 0.3 s into loading, leaving no process and no pid
+  file.
 
 ### Changed
 - Internal tightening with no behavioural change. The four adapters' copies of the stream
