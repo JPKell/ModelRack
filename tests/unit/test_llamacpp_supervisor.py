@@ -270,6 +270,119 @@ class TestSpawn:
             supervisor.spawn(model_name="m", build_argv=_argv, probe=_ready)
 
 
+class TestMemoryCap:
+    """ADR-0119 decision 2: a configured cap wraps the launch, and is never silently dropped."""
+
+    _MAX = 24 * 1024**3
+    _HIGH = 22 * 1024**3
+
+    @staticmethod
+    def _which(name: str) -> str | None:
+        return {"systemd-run": "/usr/bin/systemd-run", "llama-server": "/opt/bin/llama-server"}.get(
+            name
+        )
+
+    def _supervisor(
+        self, tmp_path: Path, launcher: FakeLauncher, sleeper: FakeSleep, **overrides: Any
+    ) -> LlamaServerSupervisor:
+        return LlamaServerSupervisor(
+            state_dir=tmp_path,
+            port_range=_PORTS,
+            launcher=launcher,
+            process_table=FakeProcessTable(),
+            port_is_free=lambda _port: True,
+            sleep=sleeper,
+            monotonic=FakeMonotonic(step_seconds=0.1),
+            startup_timeout_seconds=1.0,
+            **{"which": self._which, **overrides},
+        )
+
+    def test_the_launch_is_wrapped_in_a_capped_user_scope_exactly(
+        self, tmp_path: Path, launcher: FakeLauncher, sleeper: FakeSleep
+    ) -> None:
+        supervisor = self._supervisor(
+            tmp_path, launcher, sleeper, memory_max_bytes=self._MAX, memory_high_bytes=self._HIGH
+        )
+
+        handle = supervisor.spawn(model_name="m", build_argv=_argv, probe=_ready)
+
+        port = _PORTS[0]
+        assert launcher.specs[0].argv == (
+            "/usr/bin/systemd-run",
+            "--user",
+            "--scope",
+            "--quiet",
+            "-p",
+            f"MemoryMax={self._MAX}",
+            "-p",
+            f"MemoryHigh={self._HIGH}",
+            "-p",
+            "MemorySwapMax=0",
+            "--",
+            "/opt/bin/llama-server",
+            *_argv(port)[1:],
+        )
+        # The record says what /proc/<pid>/cmdline will show after systemd-run's in-place exec:
+        # the server's own argv with its executable resolved — never the wrapper.
+        assert handle.argv == ("/opt/bin/llama-server", *_argv(port)[1:])
+        record = PidRecord.from_json(handle.pid_path.read_text())
+        assert record.argv == handle.argv
+
+    def test_max_alone_adds_no_high(
+        self, tmp_path: Path, launcher: FakeLauncher, sleeper: FakeSleep
+    ) -> None:
+        supervisor = self._supervisor(tmp_path, launcher, sleeper, memory_max_bytes=self._MAX)
+
+        supervisor.spawn(model_name="m", build_argv=_argv, probe=_ready)
+
+        argv = launcher.specs[0].argv
+        assert "MemoryHigh" not in " ".join(argv)
+        assert argv[4:8] == ("-p", f"MemoryMax={self._MAX}", "-p", "MemorySwapMax=0")
+
+    def test_no_cap_launches_exactly_as_before(
+        self, tmp_path: Path, launcher: FakeLauncher, sleeper: FakeSleep
+    ) -> None:
+        supervisor = self._supervisor(tmp_path, launcher, sleeper)
+
+        handle = supervisor.spawn(model_name="m", build_argv=_argv, probe=_ready)
+
+        assert launcher.specs[0].argv == _argv(_PORTS[0]) == handle.argv
+
+    def test_a_cap_without_systemd_run_is_a_launch_error_naming_both(
+        self, tmp_path: Path, launcher: FakeLauncher, sleeper: FakeSleep
+    ) -> None:
+        supervisor = self._supervisor(
+            tmp_path, launcher, sleeper, memory_max_bytes=self._MAX, which=lambda _name: None
+        )
+
+        with pytest.raises(ProviderUnavailable) as caught:
+            supervisor.spawn(model_name="m", build_argv=_argv, probe=_ready)
+
+        assert caught.value.details["reason"] == ProviderUnavailableReason.LAUNCH_FAILED.value
+        assert caught.value.details["memory_max_bytes"] == self._MAX
+        assert "systemd-run" in str(caught.value)
+        assert launcher.specs == [], "nothing was launched uncapped"
+        assert supervisor.handles() == ()
+        assert list(tmp_path.glob("*.pid.json")) == []
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"memory_max_bytes": 0},
+            {"memory_max_bytes": -1},
+            {"memory_max_bytes": True},
+            {"memory_high_bytes": 1024},
+            {"memory_max_bytes": 1024, "memory_high_bytes": 1024},
+            {"memory_max_bytes": 1024, "memory_high_bytes": 2048},
+        ],
+    )
+    def test_a_malformed_cap_is_refused_at_construction(
+        self, tmp_path: Path, launcher: FakeLauncher, sleeper: FakeSleep, overrides: dict[str, Any]
+    ) -> None:
+        with pytest.raises(ValidationError):
+            self._supervisor(tmp_path, launcher, sleeper, **overrides)
+
+
 class TestPorts:
     def test_each_server_gets_the_next_free_port(self, supervisor: LlamaServerSupervisor) -> None:
         first = supervisor.spawn(model_name="a", build_argv=_argv, probe=_ready)

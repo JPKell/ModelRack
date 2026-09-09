@@ -53,6 +53,8 @@ from modelrack import (
     ProviderEvent,
     ProviderEventKind,
     ProviderStatus,
+    ProviderTimeout,
+    ProviderUnavailable,
     Role,
     SamplingParameters,
     StreamCompleted,
@@ -188,6 +190,44 @@ def llama_server_binary() -> str:
             "MODELRACK_LLAMACPP_SERVER to the binary."
         )
     return _SERVER
+
+
+@pytest.mark.usefixtures("llama_server_binary")
+class TestMemoryCap:
+    """ADR-0119 fired on purpose: a server that cannot fit its cap dies, the host does not."""
+
+    def test_a_server_under_an_impossible_cap_is_killed_not_swapped(
+        self, model_directory: Path, base_files: list[Path], tmp_path: Path
+    ) -> None:
+        if shutil.which("systemd-run") is None:
+            _skip_or_fail("No systemd-run on PATH; the cap cannot be applied here.")
+        provider = LlamaCppProvider(
+            model_directory,
+            state_dir=tmp_path / "state",
+            server_path=_SERVER,
+            startup_timeout_seconds=120.0,
+            memory_max_bytes=64 * 1024**2,  # no GGUF loads in 64 MiB of host memory
+        )
+        name = base_files[0].relative_to(provider.model_directory).with_suffix("").as_posix()
+        identity = provider.resolve(name)
+        started = time.monotonic()
+        try:
+            with pytest.raises((ProviderUnavailable, ProviderTimeout)) as caught:
+                provider.load(identity, RuntimeProfile(context_size=4096))
+        finally:
+            provider.close()
+        elapsed = time.monotonic() - started
+        details = caught.value.details
+        print(  # noqa: T201 — the measurement is this test's output
+            f"\ncap fired in {elapsed:.1f}s: {type(caught.value).__name__} "
+            f"reason={details.get('reason')} exit_code={details.get('exit_code')}"
+        )
+        # The recorded argv is the server's own (the wrapper execs it in place, ADR-0119);
+        # the resolved executable is what /proc showed while it lived.
+        assert details["argv"][0].endswith("llama-server")
+        assert elapsed < 60, "a cap that fires is seconds, never a thrash"
+        assert provider.supervisor.handles() == (), "nothing left tracked"
+        assert list((tmp_path / "state").glob("*.pid.json")) == [], "nothing left behind"
 
 
 @pytest.mark.usefixtures("llama_server_binary")

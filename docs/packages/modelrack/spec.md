@@ -174,7 +174,8 @@ OllamaProvider(base_url="http://127.0.0.1:11434", *, timeout=…, client=None)
 OpenAICompatibleProvider(base_url, *, api_key=None, timeout=…, client=None)
 LlamaCppProvider(model_directory, *, state_dir, adapters=(), server_path="llama-server",
                  port_range=(8180, 8189), launcher=None, process_table=None,
-                 digest_store=None, timeout=…, client=None)   # ADR-0062
+                 digest_store=None, timeout=…, client=None,
+                 memory_max_bytes=None, memory_high_bytes=None)   # ADR-0062, ADR-0119
 FakeProvider(script: FakeScript | None = None, *, seed: int = 0)
 
 # Errors (all subclass baseaicore.SuiteError)
@@ -307,7 +308,12 @@ an application-supplied `model_directory` and spawns `llama-server` through an i
 (ADR-0062); both directories it touches are named by the application, and its digest file lives
 in the second (ADR-0071). Adapters are supplied as `AdapterRegistration` objects — at construction
 or through `register_adapters()` — by the application that read the operator's adapter directory;
-this package never reads it (ADR-0061 rule 3). `register_adapters()` takes the **complete** set
+this package never reads it (ADR-0061 rule 3). `memory_max_bytes` (and the optional
+`memory_high_bytes` below it) wrap every `llama-server` launch in a `systemd-run --user --scope`
+with `MemoryMax`, `MemoryHigh` and `MemorySwapMax=0`, so a server that does not fit is killed by
+the kernel rather than swapping the host ([ADR-0119](../../adr/0119-model-servers-run-under-a-host-memory-cap.md));
+a cap with no `systemd-run` on `PATH` is a `ProviderUnavailable` (`launch_failed`) naming both,
+never a silent uncapped launch. `register_adapters()` takes the **complete** set
 each time: a name absent from it is retired at the next natural idle on the same terms a new one
 folds in, and there is no inverse, because the directory is the truth and a rescan restates it
 whole.

@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -109,6 +110,10 @@ _PID_FILE_SUFFIX: Final[str] = ".pid.json"
 _STDERR_FILE_SUFFIX: Final[str] = ".stderr.log"
 _LOOPBACK: Final[str] = "127.0.0.1"
 _MAX_PORT: Final[int] = 65535
+_CAP_WRAPPER: Final[str] = "systemd-run"
+"""What a memory cap is applied with: a transient user scope (ADR-0119 decision 2). ``--scope``
+execs the server in place, so the pid, the session, the stderr file and the pid record are all
+the server's own — the cap is a cgroup the kernel enforces, not a parent process."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -511,10 +516,20 @@ class LlamaServerSupervisor:
         shutdown_timeout_seconds: The grace between ``SIGTERM`` and ``SIGKILL``.
         poll_interval_seconds: How often the health probe is retried during startup.
         stderr_tail_bytes: How much captured output a startup error carries.
+        memory_max_bytes: A host-memory cap for every server this supervisor spawns
+            (ADR-0119). When set, the launch is wrapped in ``systemd-run --user --scope`` with
+            ``MemoryMax`` at this value and ``MemorySwapMax=0``, so a server that does not fit
+            is killed by the kernel in milliseconds rather than swapping the host into a thrash.
+            ``None`` — the default, and every launch before the field existed — adds nothing.
+        memory_high_bytes: The throttle point below the cap (``MemoryHigh``). Requires
+            ``memory_max_bytes`` and must be below it.
+        which: Executable lookup, ``shutil.which`` by default. Injected so a test can prove the
+            refusal when ``systemd-run`` is absent without hiding the real one.
 
     Raises:
-        ValidationError: If the port range is empty, reversed or outside 1–65535, or any
-            timeout or interval is not positive.
+        ValidationError: If the port range is empty, reversed or outside 1–65535, any timeout
+            or interval is not positive, a memory figure is not a positive number of bytes, or
+            ``memory_high_bytes`` is given without ``memory_max_bytes`` or is not below it.
     """
 
     def __init__(
@@ -532,6 +547,9 @@ class LlamaServerSupervisor:
         shutdown_timeout_seconds: float = DEFAULT_SHUTDOWN_TIMEOUT_SECONDS,
         poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
         stderr_tail_bytes: int = DEFAULT_STDERR_TAIL_BYTES,
+        memory_max_bytes: int | None = None,
+        memory_high_bytes: int | None = None,
+        which: Callable[[str], str | None] = shutil.which,
     ) -> None:
         """Validate the configuration; the state directory is created on the first spawn."""
         low, high = port_range
@@ -558,6 +576,31 @@ class LlamaServerSupervisor:
                 f"stderr_tail_bytes must be at least 1; got {stderr_tail_bytes}.",
                 details={"field": "stderr_tail_bytes", "value": stderr_tail_bytes},
             )
+        for figure_name, figure in (
+            ("memory_max_bytes", memory_max_bytes),
+            ("memory_high_bytes", memory_high_bytes),
+        ):
+            if figure is not None and (isinstance(figure, bool) or figure < 1):
+                raise ValidationError(
+                    f"{figure_name} must be a positive number of bytes or None; got {figure!r}.",
+                    details={"field": figure_name, "value": figure},
+                )
+        if memory_high_bytes is not None and (
+            memory_max_bytes is None or memory_high_bytes >= memory_max_bytes
+        ):
+            raise ValidationError(
+                "memory_high_bytes requires memory_max_bytes and must be below it: the throttle "
+                f"point is meaningless without a cap above it. Got high={memory_high_bytes!r}, "
+                f"max={memory_max_bytes!r}.",
+                details={
+                    "field": "memory_high_bytes",
+                    "value": memory_high_bytes,
+                    "memory_max_bytes": memory_max_bytes,
+                },
+            )
+        self._memory_max_bytes = memory_max_bytes
+        self._memory_high_bytes = memory_high_bytes
+        self._which = which
         self._state_dir = state_dir
         self._port_range = (low, high)
         self._launcher: ProcessLauncher = launcher or SubprocessLauncher()
@@ -646,8 +689,10 @@ class LlamaServerSupervisor:
             The handle, with ``startup_ms`` set from this process's own clock.
 
         Raises:
-            ProviderUnavailable: With ``reason`` ``launch_failed`` if no port is free or the
-                binary cannot be run (``details`` carries ``argv`` where one was built); with
+            ProviderUnavailable: With ``reason`` ``launch_failed`` if no port is free, the
+                binary cannot be run, or a memory cap is configured and ``systemd-run`` is not
+                on ``PATH`` — a configured cap is never silently dropped (``details`` carries
+                ``argv`` where one was built); with
                 ``reason`` ``process_exited`` if the server exited before it was healthy
                 (``details`` carries ``exit_code``, ``stderr_tail``, ``stderr_path``,
                 ``argv``). The pid file is removed in every failure case.
@@ -670,8 +715,9 @@ class LlamaServerSupervisor:
             argv = build_argv(port)
             stderr_path = self._state_dir / f"llama-server-{port}{_STDERR_FILE_SUFFIX}"
             pid_path = self._state_dir / f"llama-server-{port}{_PID_FILE_SUFFIX}"
+            argv, launch_argv = self._capped(argv, model_name=model_name, port=port)
             spec = LaunchSpec(
-                argv=argv,
+                argv=launch_argv,
                 port=port,
                 stderr_path=stderr_path,
                 model_name=model_name,
@@ -906,6 +952,48 @@ class LlamaServerSupervisor:
                     },
                 )
             self._sleep(self._poll_interval_seconds)
+
+    def _capped(
+        self, argv: tuple[str, ...], *, model_name: str, port: int
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Return ``(recorded_argv, launch_argv)`` for one spawn under the configured cap.
+
+        Without a cap both are ``argv``. With one, the launch is
+        ``systemd-run --user --scope --quiet -p MemoryMax=… [-p MemoryHigh=…] -p MemorySwapMax=0
+        -- <argv>`` and the recorded command line is ``argv`` with its executable resolved to a
+        path — ``systemd-run`` execs the server in place with the resolved path as ``argv[0]``,
+        and the orphan sweep compares ``/proc/<pid>/cmdline`` against what was recorded, so the
+        record has to say what the kernel will show.
+
+        Raises:
+            ProviderUnavailable: ``launch_failed`` when a cap is configured and ``systemd-run``
+                is not on ``PATH``. Refused rather than launched uncapped: the operator asked for
+                the host to be protected, and a launch that quietly is not would be the failure
+                ADR-0119 exists to end.
+        """
+        if self._memory_max_bytes is None:
+            return argv, argv
+        wrapper = self._which(_CAP_WRAPPER)
+        if wrapper is None:
+            raise ProviderUnavailable(
+                f"Could not launch llama-server for {model_name!r} under a memory cap: "
+                f"memory_max_bytes={self._memory_max_bytes} is configured and {_CAP_WRAPPER!r} "
+                "is not on PATH. Install systemd's run tool or unset the cap.",
+                details={
+                    "reason": ProviderUnavailableReason.LAUNCH_FAILED.value,
+                    "argv": list(argv),
+                    "port": port,
+                    "memory_max_bytes": self._memory_max_bytes,
+                    "wrapper": _CAP_WRAPPER,
+                },
+            )
+        recorded = (self._which(argv[0]) or argv[0], *argv[1:])
+        properties = ["-p", f"MemoryMax={self._memory_max_bytes}"]
+        if self._memory_high_bytes is not None:
+            properties += ["-p", f"MemoryHigh={self._memory_high_bytes}"]
+        properties += ["-p", "MemorySwapMax=0"]
+        launch = (wrapper, "--user", "--scope", "--quiet", *properties, "--", *recorded)
+        return recorded, launch
 
     def _allocate_port(self) -> int:
         """Pick the first port in the range that nothing this supervisor knows of is using."""

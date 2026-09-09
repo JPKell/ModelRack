@@ -567,6 +567,14 @@ class LlamaCppProvider:
         sleep: Called between health probes while a server starts. Injected so a test need not
             wait through a real startup.
         monotonic: The monotonic nanosecond clock timeouts and durations are measured with.
+        memory_max_bytes: A host-memory cap for every ``llama-server`` this adapter launches
+            (ADR-0119): the launch runs in a ``systemd-run --user --scope`` with ``MemoryMax``
+            at this value and swap denied, so a server that does not fit is killed by the kernel
+            rather than swapping the host. ``None`` launches uncapped, as every version before
+            this one did. A cap with no ``systemd-run`` on ``PATH`` is a launch error, never a
+            silent uncapped launch.
+        memory_high_bytes: The throttle point below the cap (``MemoryHigh``); requires
+            ``memory_max_bytes`` and must be below it.
 
     Raises:
         ValidationError: If ``model_directory`` is not an existing directory, or the port range
@@ -599,6 +607,8 @@ class LlamaCppProvider:
         port_is_free: Callable[[int], bool] = loopback_port_is_free,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], int] = monotonic_ns,
+        memory_max_bytes: int | None = None,
+        memory_high_bytes: int | None = None,
     ) -> None:
         """Validate the directory, build the supervisor and the pooled client."""
         directory = Path(model_directory)
@@ -635,6 +645,8 @@ class LlamaCppProvider:
             shutdown_timeout_seconds=shutdown_timeout_seconds,
             poll_interval_seconds=DEFAULT_POLL_INTERVAL_SECONDS,
             stderr_tail_bytes=DEFAULT_STDERR_TAIL_BYTES,
+            memory_max_bytes=memory_max_bytes,
+            memory_high_bytes=memory_high_bytes,
         )
         self._identities: dict[str, ModelIdentity] = {}
         # Split GGUFs found at the last discovery: group name -> its shards, in filename order.
