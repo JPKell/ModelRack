@@ -1,10 +1,15 @@
 name: Nightly
 
-# The two suites the default gate deliberately excludes (testing standards §10), for the two
-# different reasons a suite can be excluded for: `performance` asserts wall-clock budgets, which a
-# shared runner under PR load distorts, and `live` needs a real Ollama that no hosted runner has.
-# Both are real coverage, so they run on a schedule rather than not at all — a marked test that
-# never runs anywhere is an untested behaviour with a green tick beside it.
+# The `live` suite the default gate deliberately excludes (testing standards §10): it needs a real
+# Ollama that no hosted runner has. It is real coverage, so it runs on a schedule rather than not
+# at all — a marked test that never runs anywhere is an untested behaviour with a green tick
+# beside it.
+#
+# `performance` is **not** here. Its budgets are calibrated against the reference machine, and a
+# GitHub-hosted runner is roughly half its speed, so a nightly on shared hardware went red for the
+# runner rather than for a regression. Packaging standards §5 puts the budgets on a self-hosted
+# runner with the hardware; until this suite registers one, they run on the reference machine with
+# `pytest -m performance` and nowhere else.
 #
 # What is *not* here is as deliberate. Spec §15's per-stream memory budget is a performance budget
 # by subject but a deterministic assertion by method, so it runs on every push from
@@ -18,18 +23,6 @@ on:
   workflow_dispatch:
 
 jobs:
-  performance:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - run: pip install --require-hashes -r requirements/ci.lock
-      - run: pip install . --no-deps
-      # Spec §15's timing budgets, measured against a transport that does no I/O, so what the
-      # clock sees is this package's own work rather than a provider's.
-      - run: pytest -m performance -p no:randomly
-
   live:
     # No hosted runner has an Ollama, so this needs a self-hosted machine with one. Until the
     # suite has that machine, the job is present and disabled rather than absent: the command it
